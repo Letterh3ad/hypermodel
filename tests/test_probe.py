@@ -115,7 +115,7 @@ def test_baseline_features_are_fixed_width_and_align_units_digits():
 
 
 def test_feature_sets_fit_contrastive_bases_without_test_labels(tmp_path):
-    from hypermodel.probe import _feature_sets
+    from hypermodel.probe import feature_sets
     from hypermodel.trace import TraceSet
 
     rng = np.random.default_rng(6)
@@ -129,12 +129,12 @@ def test_feature_sets_fit_contrastive_bases_without_test_labels(tmp_path):
     TraceSet.write(tmp_path, resid, resid[:, :, -1], records, split, {"layers": [3, 5]})
     ts = TraceSet.load(tmp_path)
     pool = ts.mask("train") | ts.mask("val")
-    named = _feature_sets(ts, pool)
+    named = feature_sets(ts, pool)
     assert named["raw/L5/b"].shape == (n, d)
     assert named["contrastive/k1/L3/a"].shape == (n, 1)
     assert named["contrastive/strat-k4/all"].shape == (n, 2 * 3 * 4)
     # flipping test labels must not move any contrastive feature
     flipped = [dict(r, correct=(not r["correct"]) if s == "test" else r["correct"]) for r, s in zip(records, split)]
     TraceSet.write(tmp_path / "f", resid, resid[:, :, -1], flipped, split, {"layers": [3, 5]})
-    named_f = _feature_sets(TraceSet.load(tmp_path / "f"), pool)
+    named_f = feature_sets(TraceSet.load(tmp_path / "f"), pool)
     np.testing.assert_array_equal(named["contrastive/strat-k4/all"], named_f["contrastive/strat-k4/all"])

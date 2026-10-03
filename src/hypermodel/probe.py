@@ -112,7 +112,7 @@ def _write_sweep(rows: list[dict], out_dir: Path) -> None:
     plt.close(fig)
 
 
-def _feature_sets(ts, pool) -> dict[str, np.ndarray]:
+def feature_sets(ts, pool) -> dict[str, np.ndarray]:
     from hypermodel.contrastive import contrastive_basis, difficulty_strata
     from hypermodel.trace import POSITIONS
 
@@ -159,7 +159,7 @@ def main():
     if not args.skip_sweep:
         rows += [{"feature": f"sweep/L{r['layer']}", **r}
                  for r in layer_sweep(ts.last_all, y, pool, test, out_dir=args.out)]
-    for name, X in _feature_sets(ts, pool).items():
+    for name, X in feature_sets(ts, pool).items():
         if args.only and args.only not in name:
             continue
         mean, std = probe_auroc(X, y, pool, test)

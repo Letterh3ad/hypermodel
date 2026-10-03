@@ -74,3 +74,8 @@
 ## 2026-10-03 - Gate for non-arithmetic domains
 **Context**: J is the only control on an autonomous self-editor; opsec has no automatic grader.
 **Decision**: No step 4+ on any non-auto-gradable domain until it has a sealed, automatically checkable eval. Not designed yet.
+
+## 2026-10-03 - Step 2 bar reframed; "internals beat the question" moves to step 3
+**Context**: Tickets 03-04 on mul-2x3: question-only baseline AUROC 0.896, raw residuals 0.900, baseline+raw 0.900, 4 contrastive dims 0.886. With greedy decoding correctness is nearly a function of the question, so "beat the baseline by 0.05" cannot pass however good the observer is.
+**Decision**: Step 2 passes if z predicts correctness (AUROC >= 0.75) and is within 0.01 of the best question-only baseline, i.e. the observer recovers unaided what was hand-crafted. Step 3 must ablate the editor conditioned on z vs. on baseline features vs. unconditioned; if z does not help editing, the observer has failed.
+**Alternatives**: Keep the bar and fail on arithmetic; switch to sampled decoding for noisier outcomes.
