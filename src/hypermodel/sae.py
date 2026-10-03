@@ -17,7 +17,7 @@ class TopKSAE:
     @classmethod
     def from_dir(cls, path: Path, device: str = _DEVICE) -> "TopKSAE":
         path = Path(path)
-        t = {name: v.to(device) for name, v in load_file(str(path / "sae.safetensors")).items()}
+        t = {name: v.to(device, torch.float32) for name, v in load_file(str(path / "sae.safetensors")).items()}
         k = json.loads((path / "cfg.json").read_text())["k"]
         return cls(t["encoder.weight"], t["encoder.bias"], t["W_dec"], t["b_dec"], k)
 

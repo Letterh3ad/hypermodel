@@ -117,6 +117,8 @@ def main():
                    help="feature sets to concatenate, e.g. raw/all contrastive/strat-k4/all sae/all")
     p.add_argument("--sae", help="HF repo of sparsify SAEs, needed when inputs include sae/all")
     args = p.parse_args()
+    if any(name.startswith("sae") for name in args.inputs) and not args.sae:
+        p.error("--inputs with sae features needs --sae <repo>")
     ts = TraceSet.load(args.traces)
     y = ts.labels
     train, val, test = ts.mask("train"), ts.mask("val"), ts.mask("test")
