@@ -117,3 +117,8 @@
 **Context**: Retain test items are fixed (seed 0); training for seeds 1 and 2 drew their arithmetic pool with their own seed, which could overlap the test tail.
 **Decision**: One pool per setting, generated with seed 0: train takes the head, test the tail, for every seed. Seed varies only the generic-text sample.
 **Alternatives**: Per-seed test sets (verdict rows would differ across seeds).
+
+## 2026-10-03 - Hidden-state router baseline (MoLE-style)
+**Context**: A reviewer would ask whether the observer's separate unedited read (z) beats the standard mixture-of-LoRA-experts recipe, a router reading the current hidden state in the same pass.
+**Decision**: Fifth conditioning kind `router`: per edited layer and per token, g = g0 + W_l h + c_l, h being that writer's own input (the MLP activation fed to down_proj) in the edited pass. W, c zero-init so it starts at plain LoRA; linear and unnormalised like the other mixers, so g can be any sign. `LoRABank.apply` takes either a mixing tensor or a router called in each hook as router(l, h) -> [B, T, E]; a mixer's output is passed to apply as before, so call sites are unchanged. Cached generation routes each new token on its own h. Qwen3-0.6B (d_in 3072, 4 layers, E=8): 98,368 router params (W 98,304, g0 32, c 32).
+**Alternatives**: Softmax or top-k gating (changes the edit scale versus the other kinds); routing on the residual stream (another hook site); route once per sequence from the prompt (not the standard baseline).

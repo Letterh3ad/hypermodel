@@ -108,6 +108,26 @@ class ConditionedMixer(nn.Module):
         return [{"params": own, "lr": lr}] + ([{"params": enc, "lr": encoder_lr}] if enc else [])
 
 
+class RouterMixer(nn.Module):
+    """MoLE-style routing: g[b, t, l] = g0[l] + h[b, t] @ W[l] + c[l], h being writer l's input at token t.
+
+    Reads the current (edited) pass, so it needs no observer or precomputed inputs. W and c start at zero,
+    so training begins at plain LoRA."""
+
+    def __init__(self, shape: tuple[int, int], d_in: int):
+        super().__init__()
+        self.g0 = nn.Parameter(torch.ones(shape))
+        self.W = nn.Parameter(torch.zeros(shape[0], d_in, shape[1]))
+        self.c = nn.Parameter(torch.zeros(shape))
+
+    def forward(self, items: list) -> Callable[[int, torch.Tensor], torch.Tensor]:
+        return self.route
+
+    def route(self, l: int, h: torch.Tensor) -> torch.Tensor:
+        """[B, T, E] mixing for writer l from its input h [B, T, d_in]."""
+        return self.g0[l] + h.to(self.W.dtype) @ self.W[l] + self.c[l]
+
+
 class Standardize(nn.Module):
     """Fixed z-scoring, the encoder for question features."""
 

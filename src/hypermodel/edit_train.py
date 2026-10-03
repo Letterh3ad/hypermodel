@@ -149,18 +149,23 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     return history
 
 
-CONDITIONING = ("none", "features", "z-frozen", "z-finetune")
+CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "router")
 
 
 def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: list[RetainItem],
                 fit_items: list, prefix: str, observer: Path | None = None) -> nn.Module:
     """none: plain LoRA. features: question-only features. z-*: the step 2 observer on the unedited trace.
+    router: per-token routing on each writer's own input in the edited pass.
 
     Conditioning inputs for every task question and retain item are computed once up front."""
-    from hypermodel.condition import (ConditionedMixer, FeatureStore, Standardize, obs_input, question_features,
-                                      trace_features)
+    from hypermodel.condition import (ConditionedMixer, FeatureStore, RouterMixer, Standardize, obs_input,
+                                      question_features, trace_features)
+    if kind not in CONDITIONING:
+        raise ValueError(f"unknown conditioning {kind!r}")
     if kind == "none":
         return ConstantMixer(bank.shape).to(adapter.device)
+    if kind == "router":
+        return RouterMixer(bank.shape, bank.d_in).to(adapter.device)
     key = lambda it: obs_input(it, prefix).text  # noqa: E731
     questions = [Question(r["a"], r["b"], r["op"], r["answer"]) for r in ts.records]
     if kind == "features":

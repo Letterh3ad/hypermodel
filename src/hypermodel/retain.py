@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from hypermodel.adapter import ModelAdapter
 from hypermodel.arithmetic import Difficulty, few_shot_prefix, generate
-from hypermodel.editor import LoRABank
+from hypermodel.editor import LoRABank, Mixing
 from hypermodel.scoring import tokenize_regions
 
 ARITHMETIC = ("add-4", "mod-3x1")
@@ -67,7 +67,7 @@ def retain_batch(tok, items: list[RetainItem], device) -> dict:
     return {**batch, "kl_mask": kl_mask}
 
 
-def token_kl(adapter: ModelAdapter, bank: LoRABank, g: torch.Tensor, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
+def token_kl(adapter: ModelAdapter, bank: LoRABank, g: Mixing, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
     """KL per predicted token inside batch["kl_mask"], and the row each came from; base pass has hooks off."""
     inputs = {k: batch[k] for k in ("input_ids", "attention_mask", "position_ids")}
     # Position t predicts token t + 1, and must itself be real: under left padding a pad predicts the first token.
@@ -87,6 +87,6 @@ def source_balanced(kl: torch.Tensor, rows: torch.Tensor, sources: list[str]) ->
     return torch.stack([kl[src == i].mean() for i in src.unique()]).mean()
 
 
-def retain_kl(adapter: ModelAdapter, bank: LoRABank, g: torch.Tensor, batch: dict,
+def retain_kl(adapter: ModelAdapter, bank: LoRABank, g: Mixing, batch: dict,
               sources: list[str]) -> torch.Tensor:
     return source_balanced(*token_kl(adapter, bank, g, batch), sources)
