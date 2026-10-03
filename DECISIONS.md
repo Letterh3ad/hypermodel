@@ -127,3 +127,8 @@
 **Context**: Phase 1's baseline features include log10(answer), harmless for predicting correctness but answer-derived information when fed to an editor (float32 resolves a 5-digit answer).
 **Decision**: (F's call) The features variant uses operand-only features (`baseline_features(..., with_answer=False)`); phase 1 keeps the original set. The first features run was killed 5 min in and restarted.
 **Alternatives**: Keep it as a stronger-than-fair control.
+
+## 2026-10-03 - Step 3 ablation runs to a fixed step cap
+**Context:** Seed-0 features run early-stopped at 2250 (patience 4) mid-learning; plain LoRA hit the 3000 cap still rising. Val (1000 q) noise is ~1 pt, so patience 4 cut variants unevenly.
+**Decision:** Ticket 04 runs every variant with `--max-steps 5000 --patience 20` (cap decides); best-val checkpoint restored as before.
+**Alternatives:** keep patience 4 (unfair to slow starters); drop early stopping code (unneeded, high patience is equivalent).
