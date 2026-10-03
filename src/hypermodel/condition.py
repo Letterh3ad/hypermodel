@@ -52,7 +52,7 @@ def question_features(items: list, prefix: str) -> tuple[list[str], np.ndarray]:
         else:
             continue
         rows.append(i)
-    base = baseline_features(records) if records else np.zeros((0, 0), np.float32)
+    base = baseline_features(records, with_answer=False) if records else np.zeros((0, 0), np.float32)
     X = np.zeros((len(items), base.shape[1] + 1), np.float32)
     X[rows, :-1] = base
     X[:, -1] = [not (isinstance(it, Question) or it.source != "text") for it in items]

@@ -109,3 +109,11 @@ def test_question_features_share_one_schema_across_tasks_and_flag_text():
     assert keys == ["47*815=", "12*345=", "9+9=18\n1234+5678=", "Plain prose."]
     assert X.shape[0] == 4 and not np.allclose(X[0], X[1])
     assert X[3, -1] == 1 and np.all(X[3, :-1] == 0) and np.all(X[:3, -1] == 0)
+
+
+def test_question_features_carry_nothing_derived_from_the_answer():
+    from hypermodel.condition import question_features
+    _, X = question_features([Question(47, 815, "mul", 38305), Question(47, 815, "mul", 1),
+                              RetainItem("1234+5678=6912\n", 0, "add-4"), RetainItem("1234+5678=1\n", 0, "add-4")], "")
+    np.testing.assert_array_equal(X[0], X[1])
+    np.testing.assert_array_equal(X[2], X[3])
