@@ -122,3 +122,8 @@
 **Context**: A reviewer would ask whether the observer's separate unedited read (z) beats the standard mixture-of-LoRA-experts recipe, a router reading the current hidden state in the same pass.
 **Decision**: Fifth conditioning kind `router`: per edited layer and per token, g = g0 + W_l h + c_l, h being that writer's own input (the MLP activation fed to down_proj) in the edited pass. W, c zero-init so it starts at plain LoRA; linear and unnormalised like the other mixers, so g can be any sign. `LoRABank.apply` takes either a mixing tensor or a router called in each hook as router(l, h) -> [B, T, E]; a mixer's output is passed to apply as before, so call sites are unchanged. Cached generation routes each new token on its own h. Qwen3-0.6B (d_in 3072, 4 layers, E=8): 98,368 router params (W 98,304, g0 32, c 32).
 **Alternatives**: Softmax or top-k gating (changes the edit scale versus the other kinds); routing on the residual stream (another hook site); route once per sequence from the prompt (not the standard baseline).
+
+## 2026-10-03 - Editor question features exclude the answer's magnitude
+**Context**: Phase 1's baseline features include log10(answer), harmless for predicting correctness but answer-derived information when fed to an editor (float32 resolves a 5-digit answer).
+**Decision**: (F's call) The features variant uses operand-only features (`baseline_features(..., with_answer=False)`); phase 1 keeps the original set. The first features run was killed 5 min in and restarted.
+**Alternatives**: Keep it as a stronger-than-fair control.
