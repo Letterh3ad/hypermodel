@@ -50,9 +50,24 @@ def test_seeds_change_the_result_but_a_seed_repeats():
     rng = np.random.default_rng(2)
     X = rng.standard_normal((500, 16)).astype(np.float32)
     y = X[:, 0] + rng.standard_normal(500) > 0
-    train, test = _split(500, rng)
-    assert fit_probe(X, y, train, test, seed=3) == fit_probe(X, y, train, test, seed=3)
-    assert len({fit_probe(X, y, train, test, seed=s) for s in range(3)}) > 1
+    pool, test = _split(500, rng)
+    assert probe_auroc(X, y, pool, test, seeds=(3,)) == probe_auroc(X, y, pool, test, seeds=(3,))
+    assert probe_auroc(X, y, pool, test, seeds=(0, 1, 2))[1] > 0
+
+
+def test_l2_tuned_on_val_beats_an_untuned_probe_on_a_weak_high_dim_signal():
+    rng = np.random.default_rng(5)
+    n, d = 5000, 1024
+    X = rng.standard_normal((n, d)).astype(np.float32)
+    w = np.zeros(d)
+    w[:8] = 1
+    signal = X @ w
+    y = signal + 2.5 * rng.standard_normal(n) > 0
+    pool, test = _split(n, rng)
+    # ~2k rows in 1024 isotropic dims cap any dense linear probe near 0.76 (ideal 0.86)
+    untuned = fit_probe(X, y, pool, test, l2=1e-4)
+    mean, _ = probe_auroc(X, y, pool, test, seeds=(0,))
+    assert mean > untuned + 0.01 and mean > 0.73, (mean, untuned)
 
 
 def test_sweep_finds_the_layer_with_signal(tmp_path):
@@ -97,3 +112,29 @@ def test_baseline_features_are_fixed_width_and_align_units_digits():
     same = baseline_features([{"a": 17, "b": 12, "op": "mul", "answer": 204},
                               {"a": 123, "b": 45, "op": "mul", "answer": 5535}])
     assert same.shape == X.shape
+
+
+def test_feature_sets_fit_contrastive_bases_without_test_labels(tmp_path):
+    from hypermodel.probe import _feature_sets
+    from hypermodel.trace import TraceSet
+
+    rng = np.random.default_rng(6)
+    n, d = 400, 16
+    records = _records(rng, n)
+    y = rng.random(n) < 0.5
+    for r, c in zip(records, y):
+        r["correct"] = bool(c)
+    split = np.array(["train", "val", "test", "train", "train"] * (n // 5))
+    resid = rng.standard_normal((n, 2, 3, d)).astype(np.float16)
+    TraceSet.write(tmp_path, resid, resid[:, :, -1], records, split, {"layers": [3, 5]})
+    ts = TraceSet.load(tmp_path)
+    pool = ts.mask("train") | ts.mask("val")
+    named = _feature_sets(ts, pool)
+    assert named["raw/L5/b"].shape == (n, d)
+    assert named["contrastive/k1/L3/a"].shape == (n, 1)
+    assert named["contrastive/strat-k4/all"].shape == (n, 2 * 3 * 4)
+    # flipping test labels must not move any contrastive feature
+    flipped = [dict(r, correct=(not r["correct"]) if s == "test" else r["correct"]) for r, s in zip(records, split)]
+    TraceSet.write(tmp_path / "f", resid, resid[:, :, -1], flipped, split, {"layers": [3, 5]})
+    named_f = _feature_sets(TraceSet.load(tmp_path / "f"), pool)
+    np.testing.assert_array_equal(named["contrastive/strat-k4/all"], named_f["contrastive/strat-k4/all"])
