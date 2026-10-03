@@ -10,6 +10,11 @@ from hypermodel.arithmetic import Question
 _INT = re.compile(r"-?\d+")
 
 
+def require_left_padding(tok) -> None:
+    if tok.padding_side != "left":
+        raise ValueError("tokenizer must pad on the left so the last column is each prompt's final token")
+
+
 def parse_answer(completion: str) -> int | None:
     m = _INT.search(completion.split("\n", 1)[0])
     return int(m.group()) if m else None
@@ -19,6 +24,7 @@ def parse_answer(completion: str) -> int | None:
 def score(adapter: ModelAdapter, questions: list[Question], prefix: str,
           batch_size: int = 64) -> list[dict]:
     tok = adapter.tokenizer
+    require_left_padding(tok)
     max_new = 2 + max(len(str(q.answer)) for q in questions)
     records = []
     for i in range(0, len(questions), batch_size):

@@ -79,3 +79,21 @@ def test_reload_of_a_few_thousand_traces_is_fast(tmp_path):
     ts = TraceSet.load(tmp_path)
     float(ts.resid[:, :, -1].astype(np.float32).mean())
     assert time.perf_counter() - t < 5
+
+
+def test_mirror_questions_share_a_split():
+    from hypermodel.arithmetic import Question
+    from hypermodel.trace import _split
+    qs = [Question(a, b, "mul", a * b) for a in range(10, 40) for b in range(10, 40)]
+    split = dict(zip(qs, _split(qs, seed=0)))
+    assert all(split[q] == split[Question(q.b, q.a, "mul", q.answer)] for q in qs)
+    assert set(split.values()) == {"train", "val", "test"}
+
+
+def test_right_padded_tokenizer_is_rejected(small_lm):
+    small_lm.tokenizer.padding_side = "right"
+    try:
+        with pytest.raises(ValueError, match="left"):
+            record(small_lm, generate(D, 2, seed=0), few_shot_prefix(D), [1], "unused")
+    finally:
+        small_lm.tokenizer.padding_side = "left"

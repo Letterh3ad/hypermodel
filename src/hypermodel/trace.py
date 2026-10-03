@@ -11,7 +11,7 @@ import torch
 
 from hypermodel.adapter import ModelAdapter, load
 from hypermodel.arithmetic import Difficulty, Question, few_shot_prefix, generate
-from hypermodel.scoring import score
+from hypermodel.scoring import require_left_padding, score
 
 POSITIONS = ("a", "b", "last")  # last digit of each operand, and the "=" the answer follows
 SPLITS = ("train", "val", "test")
@@ -19,6 +19,7 @@ SPLITS = ("train", "val", "test")
 
 def operand_token_positions(tok, prefix: str, questions: list[Question]):
     """Tokenize prefix + prompt (left padded) and locate POSITIONS by character offsets."""
+    require_left_padding(tok)
     enc = tok([prefix + q.prompt for q in questions], return_tensors="pt", padding=True,
               return_offsets_mapping=True)
     offsets = enc.pop("offset_mapping")
@@ -34,13 +35,16 @@ def operand_token_positions(tok, prefix: str, questions: list[Question]):
     return enc, pos
 
 
-def _split(n: int, seed: int) -> np.ndarray:
-    split = np.empty(n, dtype="<U5")
-    perm = np.random.default_rng(seed).permutation(n)
-    cuts = (int(0.6 * n), int(0.8 * n))
-    for name, idx in zip(SPLITS, np.split(perm, cuts)):
-        split[idx] = name
-    return split
+def _split(questions: list[Question], seed: int) -> np.ndarray:
+    """60/20/20 by question, with a*b and b*a always on the same side."""
+    keys = [(q.op, *sorted((q.a, q.b))) if q.op in ("add", "mul") else (q.op, q.a, q.b) for q in questions]
+    unique = sorted(set(keys))
+    perm = np.random.default_rng(seed).permutation(len(unique))
+    n = len(unique)
+    side = {}
+    for name, idx in zip(SPLITS, np.split(perm, (int(0.6 * n), int(0.8 * n)))):
+        side.update({unique[i]: name for i in idx})
+    return np.array([side[k] for k in keys])
 
 
 @dataclass
@@ -117,9 +121,9 @@ def record(adapter: ModelAdapter, questions: list[Question], prefix: str, layers
            out_dir: Path, batch_size: int = 64, seed: int = 0) -> Path:
     records = score(adapter, questions, prefix, batch_size)
     resid, last_all = _capture(adapter, questions, prefix, layers, batch_size)
-    meta = {"model": adapter.model.config.name_or_path, "layers": list(layers),
+    meta = {"model": adapter.model.config.name_or_path, "dtype": str(adapter.model.dtype), "layers": list(layers),
             "n_layers": adapter.n_layers, "d_model": adapter.d_model, "seed": seed, "prefix": prefix}
-    return TraceSet.write(out_dir, resid, last_all, records, _split(len(questions), seed), meta)
+    return TraceSet.write(out_dir, resid, last_all, records, _split(questions, seed), meta)
 
 
 def default_layers(n_layers: int) -> list[int]:
@@ -135,9 +139,10 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
-    adapter = load(args.model, args.device)
+    adapter = load(args.model, args.device, getattr(torch, args.dtype))
     layers = args.layers or default_layers(adapter.n_layers)
     qs = generate(args.setting, args.n, args.seed)
     t = time.perf_counter()

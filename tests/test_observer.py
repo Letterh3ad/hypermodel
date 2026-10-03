@@ -45,3 +45,23 @@ def test_noise_gives_a_chance_level_z():
     z = train_observer(X, y, train, val, k=8, seed=0).encode(X)
     mean, _ = probe_auroc(z, y, train | val, test, seeds=(0,))
     assert 0.4 < mean < 0.6
+
+
+def test_test_labels_never_reach_the_observer():
+    X, y, train, val, test = _data(4, n=600)
+    flipped = y.copy()
+    flipped[test] = ~flipped[test]
+    a = train_observer(X, y, train, val, k=8, seed=0, max_epochs=10)
+    b = train_observer(X, flipped, train, val, k=8, seed=0, max_epochs=10)
+    np.testing.assert_array_equal(a.encode(X), b.encode(X))
+
+
+def test_paired_bootstrap_ci_brackets_the_true_difference():
+    from hypermodel.observer import paired_auroc_ci
+    rng = np.random.default_rng(5)
+    y = rng.random(4000) < 0.4
+    s = y + rng.standard_normal(4000)
+    lo, hi = paired_auroc_ci(s, s, y, n_boot=200)
+    assert lo == hi == 0.0
+    lo, hi = paired_auroc_ci(s, rng.standard_normal(4000), y, n_boot=200)
+    assert 0.1 < lo < hi < 0.4

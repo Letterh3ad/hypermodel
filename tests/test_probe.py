@@ -128,13 +128,12 @@ def test_feature_sets_fit_contrastive_bases_without_test_labels(tmp_path):
     resid = rng.standard_normal((n, 2, 3, d)).astype(np.float16)
     TraceSet.write(tmp_path, resid, resid[:, :, -1], records, split, {"layers": [3, 5]})
     ts = TraceSet.load(tmp_path)
-    pool = ts.mask("train") | ts.mask("val")
-    named = feature_sets(ts, pool)
+    named = feature_sets(ts, ts.mask("train"))
     assert named["raw/L5/b"].shape == (n, d)
     assert named["contrastive/k1/L3/a"].shape == (n, 1)
     assert named["contrastive/strat-k4/all"].shape == (n, 2 * 3 * 4)
-    # flipping test labels must not move any contrastive feature
-    flipped = [dict(r, correct=(not r["correct"]) if s == "test" else r["correct"]) for r, s in zip(records, split)]
+    # flipping val and test labels must not move any contrastive feature
+    flipped = [dict(r, correct=(not r["correct"]) if s != "train" else r["correct"]) for r, s in zip(records, split)]
     TraceSet.write(tmp_path / "f", resid, resid[:, :, -1], flipped, split, {"layers": [3, 5]})
-    named_f = feature_sets(TraceSet.load(tmp_path / "f"), pool)
+    named_f = feature_sets(TraceSet.load(tmp_path / "f"), ts.mask("train"))
     np.testing.assert_array_equal(named["contrastive/strat-k4/all"], named_f["contrastive/strat-k4/all"])

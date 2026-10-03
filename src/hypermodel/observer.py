@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from hypermodel.probe import auroc, probe_auroc
+from hypermodel.probe import L2_GRID, auroc, probe_scores
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -32,6 +32,12 @@ class Observer(nn.Module):
         dev = self.mu.device
         return np.concatenate([self(torch.as_tensor(np.asarray(X[i:i + batch_size], np.float32), device=dev))
                                .cpu().numpy() for i in range(0, len(X), batch_size)])
+
+    @torch.no_grad()
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Correctness logits from the training head."""
+        z = torch.as_tensor(self.encode(X), device=self.mu.device)
+        return self.head(z).squeeze(1).cpu().numpy()
 
     def save(self, path: Path) -> None:
         torch.save({"config": self.config, "state": self.state_dict()}, path)
@@ -79,6 +85,23 @@ def train_observer(X: np.ndarray, y: np.ndarray, train: np.ndarray, val: np.ndar
     return obs.eval()
 
 
+def paired_auroc_ci(s_a: np.ndarray, s_b: np.ndarray, y: np.ndarray, n_boot: int = 2000, seed: int = 0,
+                    alpha: float = 0.05) -> tuple[float, float]:
+    """Percentile CI of AUROC(s_a) - AUROC(s_b), resampling the same rows for both."""
+    rng = np.random.default_rng(seed)
+    diffs = []
+    while len(diffs) < n_boot:
+        idx = rng.integers(0, len(y), len(y))
+        if y[idx].all() or not y[idx].any():
+            continue
+        diffs.append(auroc(s_a[idx], y[idx]) - auroc(s_b[idx], y[idx]))
+    lo, hi = np.quantile(diffs, [alpha / 2, 1 - alpha / 2])
+    return float(lo), float(hi)
+
+
+MARGIN = 0.01
+
+
 def main():
     import argparse
 
@@ -97,23 +120,34 @@ def main():
     ts = TraceSet.load(args.traces)
     y = ts.labels
     train, val, test = ts.mask("train"), ts.mask("val"), ts.mask("test")
-    pool = train | val
-    named = feature_sets(ts, pool, args.sae)
+    named = feature_sets(ts, train, args.sae)
     X = np.concatenate([named[name] for name in args.inputs], 1)
-    base, _ = probe_auroc(named["baseline"], y, pool, test)
+    B = named["baseline"]
+    # Linear baseline with l2 chosen on val, plus an observer-sized MLP on the same question-only features.
+    l2 = max(L2_GRID, key=lambda v: auroc(probe_scores(B, y, train, val, v), y[val]))
+    base_scores = probe_scores(B, y, train, test, l2)
+    base = auroc(base_scores, y[test])
+    mlp_base = auroc(train_observer(B, y, train, val, k=args.k, seed=0).predict(B[test]), y[test])
+    print(f"baseline linear {base:.3f}, baseline MLP {mlp_base:.3f}", flush=True)
     args.out.mkdir(parents=True, exist_ok=True)
     rows = []
     for seed in args.seeds:
         obs = train_observer(X, y, train, val, k=args.k, seed=seed)
-        z = obs.encode(X)
-        mean, _ = probe_auroc(z, y, pool, test, seeds=(seed,))
+        # Scored by the head on test rows only: no second probe fit on rows the observer trained on.
+        scores = obs.predict(X[test])
+        a = auroc(scores, y[test])
+        lo, hi = paired_auroc_ci(scores, base_scores, y[test], seed=seed)
         obs.save(args.out / f"observer-s{seed}.pt")
-        np.save(args.out / f"z-s{seed}.npy", z)
-        rows.append({"seed": seed, "k": args.k, "inputs": args.inputs, "z_auroc": mean})
-        print(f"seed {seed}: z AUROC {mean:.3f}", flush=True)
-    z_mean = float(np.mean([r["z_auroc"] for r in rows]))
-    verdict = {"z_auroc_mean": z_mean, "z_auroc_std": float(np.std([r["z_auroc"] for r in rows])),
-               "baseline_auroc": base, "pass": z_mean >= 0.75 and z_mean >= base - 0.01}
+        np.save(args.out / f"z-s{seed}.npy", obs.encode(X))
+        rows.append({"seed": seed, "k": args.k, "inputs": args.inputs, "z_auroc": a,
+                     "diff_vs_baseline_ci": [lo, hi]})
+        print(f"seed {seed}: z AUROC {a:.3f}, z - baseline 95% CI [{lo:+.3f}, {hi:+.3f}]", flush=True)
+    aucs = [r["z_auroc"] for r in rows]
+    verdict = {"z_auroc_mean": float(np.mean(aucs)), "z_auroc_std": float(np.std(aucs)),
+               "baseline_auroc": base, "baseline_mlp_auroc": mlp_base, "n_test": int(test.sum()),
+               "margin": MARGIN,
+               # Non-inferiority: every seed's CI must clear -MARGIN.
+               "pass": min(aucs) >= 0.75 and all(r["diff_vs_baseline_ci"][0] >= -MARGIN for r in rows)}
     rows.append(verdict)
     (args.out / "observer.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(json.dumps(verdict))

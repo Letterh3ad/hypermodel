@@ -24,6 +24,10 @@ _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def fit_probe(X: np.ndarray, y: np.ndarray, train: np.ndarray, test: np.ndarray, l2: float = 1.0) -> float:
     """Standardized L2 logistic regression fit on train rows, scored by AUROC on test rows."""
+    return auroc(probe_scores(X, y, train, test, l2), y[test])
+
+
+def probe_scores(X: np.ndarray, y: np.ndarray, train: np.ndarray, test: np.ndarray, l2: float = 1.0) -> np.ndarray:
     Xtr = torch.as_tensor(np.asarray(X[train], np.float32), device=_DEVICE)
     mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6
     Xtr = (Xtr - mu) / sd
@@ -41,7 +45,7 @@ def fit_probe(X: np.ndarray, y: np.ndarray, train: np.ndarray, test: np.ndarray,
     opt.step(closure)
     with torch.no_grad():
         Xte = (torch.as_tensor(np.asarray(X[test], np.float32), device=_DEVICE) - mu) / sd
-        return auroc((Xte @ w + b).cpu().numpy(), y[test])
+        return (Xte @ w + b).cpu().numpy()
 
 
 def probe_auroc(X, y, pool, test, seeds=(0, 1, 2), grid=L2_GRID) -> tuple[float, float]:
@@ -112,7 +116,7 @@ def _write_sweep(rows: list[dict], out_dir: Path) -> None:
     plt.close(fig)
 
 
-def feature_sets(ts, pool, sae_repo: str | None = None) -> dict[str, np.ndarray]:
+def feature_sets(ts, fit, sae_repo: str | None = None) -> dict[str, np.ndarray]:
     from hypermodel.contrastive import contrastive_basis, difficulty_strata
     from hypermodel.trace import POSITIONS
 
@@ -126,9 +130,9 @@ def feature_sets(ts, pool, sae_repo: str | None = None) -> dict[str, np.ndarray]
         for j, pos in enumerate(POSITIONS):
             acts = resid[:, i, j]
             named[f"raw/L{layer}/{pos}"] = acts
-            # Bases are fit on train+val only; test labels never touch them.
+            # Bases are fit on train rows only; val selects l2 and early stopping, test stays unseen.
             for tag, kw in {"k1": {}, "strat-k4": {"strata": strata, "k": 4}}.items():
-                proj = acts @ contrastive_basis(acts, ts.labels, pool, **kw)
+                proj = acts @ contrastive_basis(acts, ts.labels, fit, **kw)
                 named[f"contrastive/{tag}/L{layer}/{pos}"] = proj
                 if tag == "strat-k4":
                     contrast.append(proj)
@@ -139,12 +143,12 @@ def feature_sets(ts, pool, sae_repo: str | None = None) -> dict[str, np.ndarray]
     named["baseline+raw/last"] = np.concatenate([named["baseline"], last], 1)
     named["baseline+contrastive"] = np.concatenate([named["baseline"], named["contrastive/strat-k4/all"]], 1)
     if sae_repo:
-        named.update(_sae_features(ts, pool, resid, sae_repo))
+        named.update(_sae_features(ts, fit, resid, sae_repo))
         named["baseline+sae"] = np.concatenate([named["baseline"], named["sae/all"]], 1)
     return named
 
 
-def _sae_features(ts, pool, resid, repo) -> dict[str, np.ndarray]:
+def _sae_features(ts, fit, resid, repo) -> dict[str, np.ndarray]:
     from hypermodel.sae import TopKSAE, active_latents
     from hypermodel.trace import POSITIONS
 
@@ -153,8 +157,7 @@ def _sae_features(ts, pool, resid, repo) -> dict[str, np.ndarray]:
         sae = TopKSAE.from_hub(repo, layer)
         for j, pos in enumerate(POSITIONS):
             acts = sae.encode(resid[:, i, j])
-            # Latent choice uses train+val rows only.
-            feats = acts[:, active_latents(acts, pool)]
+            feats = acts[:, active_latents(acts, fit)]
             named[f"sae/L{layer}/{pos}"] = feats
             parts.append(feats)
     named["sae/all"] = np.concatenate(parts, 1)
@@ -180,7 +183,7 @@ def main():
     if not args.skip_sweep:
         rows += [{"feature": f"sweep/L{r['layer']}", **r}
                  for r in layer_sweep(ts.last_all, y, pool, test, out_dir=args.out)]
-    for name, X in feature_sets(ts, pool, args.sae).items():
+    for name, X in feature_sets(ts, ts.mask("train"), args.sae).items():
         if args.only and args.only not in name:
             continue
         mean, std = probe_auroc(X, y, pool, test)

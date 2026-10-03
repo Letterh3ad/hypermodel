@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+import torch
+
 from hypermodel.adapter import ModelAdapter, load
 from hypermodel.arithmetic import Difficulty, few_shot_prefix, generate
 from hypermodel.scoring import score
@@ -36,10 +38,11 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
     settings = args.settings or [Difficulty(op, d) for op in args.ops for d in args.digits]
-    sweep(load(args.model, args.device), settings, args.n, args.seed, args.out, args.batch_size)
+    sweep(load(args.model, args.device, getattr(torch, args.dtype)), settings, args.n, args.seed, args.out, args.batch_size)
 
 
 if __name__ == "__main__":
