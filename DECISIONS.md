@@ -97,3 +97,8 @@
 ## 2026-10-03 - Step 3 pass bar
 **Decision**: On held-out mul-2x3 (4000 test questions, 3 seeds): z-conditioned editor raises accuracy above base (33%); retain KL <= 0.05 nats/token; z-conditioned beats both plain LoRA (unconditioned) and question-feature-conditioned with paired-bootstrap CI excluding zero. Failing the last is a valid research result, not something to tune away.
 **Alternatives**: Accuracy gain alone (would not test the observer).
+
+## 2026-10-03 - Step 3 training defaults (ticket 01)
+**Context**: Plain-LoRA baseline needed fixed hyperparameters before the conditioned variants reuse the loop.
+**Decision**: Target is answer + newline (prompt masked), matching the scorer's stop. AdamW lr 1e-3, batch 16, alpha 16 (scale 2), constant mixing initialised to 1, V Kaiming, U zero. Early stopping scores 1000 sampled val questions every 250 steps, keeps the strictly best checkpoint, patience 4, cap 3000 steps. Every variant uses the same settings.
+**Alternatives**: Stop on val loss (cheaper, but accuracy is the measured outcome); tune per variant (would confound the ablation).
