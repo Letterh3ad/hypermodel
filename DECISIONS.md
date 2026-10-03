@@ -84,3 +84,16 @@
 **Context**: Gate round 1: the 3-seed spread ignored test-sampling error (1000 test rows); paired bootstrap of z minus baseline had CIs down to -0.025, and an observer-sized MLP on question-only features matched z.
 **Decision**: z is scored by its own head on test rows. Pass needs AUROC >= 0.75 and, for every seed, the lower 95% paired-bootstrap bound of (z - linear baseline) >= -0.01. Report the MLP-on-baseline control. Traces re-recorded at 20k (4000 test rows) to halve the CI width. Splits keyed so a*b and b*a share a side; contrastive bases and SAE latent choice fit on train only.
 **Alternatives**: Mean over seeds against a point threshold (what round 1 broke).
+
+## 2026-10-03 - Step 3 editor: shared LoRA bank with z-conditioned mixing
+**Context**: A raw hypernetwork emitting U, V (rank 8, ~32k outputs per layer) is large and unstable.
+**Decision**: Per edited layer, a learned bank of E rank-r LoRA experts on the MLP output projection; the editor maps the conditioning vector to per-question mixing weights and scales. Unconditioned mode (constant mixing) is plain LoRA at matched parameter count and serves as the LoRA baseline. Edits are transient (per question, discarded).
+**Alternatives**: Raw hypernetwork to U, V (MEND-style).
+
+## 2026-10-03 - Step 3 placement, observer training, retain set
+**Decision**: Edit layers 12, 15, 18, 21 at rank 8 (later tunable in step 5). Observer initialised from step 2 and fine-tuned end to end at a lower LR; frozen-observer variant as ablation. Retain set: generic text snippets plus add-4 and mod-3x1 questions.
+**Alternatives**: Edit all layers; frozen observer only; text-only retain set.
+
+## 2026-10-03 - Step 3 pass bar
+**Decision**: On held-out mul-2x3 (4000 test questions, 3 seeds): z-conditioned editor raises accuracy above base (33%); retain KL <= 0.05 nats/token; z-conditioned beats both plain LoRA (unconditioned) and question-feature-conditioned with paired-bootstrap CI excluding zero. Failing the last is a valid research result, not something to tune away.
+**Alternatives**: Accuracy gain alone (would not test the observer).
