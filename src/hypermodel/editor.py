@@ -1,12 +1,15 @@
-"""Transient edits: a bank of LoRA experts on the residual writers, mixed per example."""
+"""Transient edits: a bank of LoRA experts on the residual writers, mixed per example or per token."""
 
 import math
+from collections.abc import Callable
 from contextlib import contextmanager
 
 import torch
 from torch import nn
 
 from hypermodel.adapter import ModelAdapter
+
+Mixing = torch.Tensor | Callable[[int, torch.Tensor], torch.Tensor]
 
 
 class EditLog:
@@ -24,7 +27,7 @@ class EditLog:
 
 
 class LoRABank(nn.Module):
-    """Writer l gains sum_e g[b, l, e] * (alpha / rank) * (h @ V[l, e]) @ U[l, e]^T, h being its input."""
+    """Writer l gains sum_e g[b, t, l, e] * (alpha / rank) * (h @ V[l, e]) @ U[l, e]^T, h being its input."""
 
     def __init__(self, adapter: ModelAdapter, layers: list[int], n_experts: int = 8, rank: int = 8,
                  alpha: float = 16.0):
@@ -44,23 +47,34 @@ class LoRABank(nn.Module):
         """(layers, experts): the trailing shape of a mixing tensor g."""
         return self.V.shape[0], self.V.shape[1]
 
+    @property
+    def d_in(self) -> int:
+        return self.V.shape[2]
+
     def delta(self, l: int, h: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-        """Edit added to writer l's output; g is [E] or [B, E], h is [B, T, d_in]."""
+        """Edit added to writer l's output; g is [E], [B, E] or [B, T, E], h is [B, T, d_in]."""
         low = torch.einsum("btd,edr->bter", h, self.V[l].to(h.dtype))
-        g = g.to(h.dtype).expand(h.shape[0], -1)
-        return self.scale * torch.einsum("bter,be,eor->bto", low, g, self.U[l].to(h.dtype))
+        g = g.to(h.dtype)
+        g = (g if g.dim() == 3 else g.unsqueeze(-2)).expand(*h.shape[:2], -1)
+        return self.scale * torch.einsum("bter,bte,eor->bto", low, g, self.U[l].to(h.dtype))
 
     @contextmanager
-    def apply(self, g: torch.Tensor):
-        """Hooks the writers for the duration; g is [L, E] (shared) or [B, L, E] (per example)."""
-        if g.shape[-2:] != self.shape:
-            raise ValueError(f"mixing shape {tuple(g.shape)} does not end in {self.shape}")
+    def apply(self, mixing: Mixing):
+        """Hooks the writers for the duration.
+
+        mixing is g [L, E] (shared), g [B, L, E] (per example), or a router called in each hook as
+        router(l, h) -> [B, T, E] (per token, from the writer's own input h)."""
+        if isinstance(mixing, torch.Tensor):
+            if mixing.shape[-2:] != self.shape:
+                raise ValueError(f"mixing shape {tuple(mixing.shape)} does not end in {self.shape}")
+            g = mixing
+            mixing = lambda l, h: g[..., l, :]  # noqa: E731
 
         log = EditLog()
 
         def hook(l):
             def fn(_m, inp, out):
-                d = self.delta(l, inp[0], g[..., l, :])
+                d = self.delta(l, inp[0], mixing(l, inp[0]))
                 log.add(d)
                 return out + d
             return fn

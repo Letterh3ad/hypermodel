@@ -100,7 +100,31 @@ def test_per_question_edits_survive_batched_scoring(small_lm):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune"])
+def test_per_token_routing_survives_batched_scoring(small_lm):
+    from hypermodel.condition import RouterMixer
+    torch.manual_seed(0)
+    prefix = few_shot_prefix(Difficulty("add", 2))
+    qs = generate(Difficulty("add", 2), 7, seed=3)
+    bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
+    mixer = RouterMixer(bank.shape, bank.d_in)
+    with torch.no_grad():
+        bank.U.normal_(std=0.1)
+        mixer.W.normal_(std=0.05)
+    batched = evaluate(small_lm, bank, mixer, qs, prefix, batch_size=3)
+    single = evaluate(small_lm, bank, mixer, qs, prefix, batch_size=1)
+    assert [r["pred"] for r in batched] == [r["pred"] for r in single]
+    assert len({r["pred"] for r in single}) > 1
+    # Each cached decoding step routes on the new token alone; that must match re-reading the whole sequence.
+    enc = small_lm.tokenizer([prefix + q.prompt for q in qs[:3]], return_tensors="pt", padding=True)
+    with torch.no_grad(), bank.apply(mixer(qs[:3])):
+        cached, uncached = (small_lm.model.generate(**enc, max_new_tokens=4, do_sample=False, use_cache=c,
+                                                    pad_token_id=small_lm.tokenizer.pad_token_id)
+                            for c in (True, False))
+    assert torch.equal(cached, uncached)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune", "router"])
 def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypatch, kind):
     import hypermodel.retain as retain
     from hypermodel.edit_train import build_mixer, evaluate_retain, split_questions
@@ -124,6 +148,8 @@ def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypat
           retain=r_train, gamma=0.1)
     assert evaluate(small_lm, bank, mixer, qs["test"], prefix, batch_size=3)
     assert set(evaluate_retain(small_lm, bank, mixer, r_test)) >= {"text", "add-4", "mod-3x1", "worst"}
+    if kind == "router":
+        assert mixer.W.abs().sum() > 0  # gradient reached the zero-initialised router
     if kind.startswith("z"):
         moved = any(not torch.equal(v, before[k]) for k, v in enc.state_dict().items() if "encoder" in k)
         assert moved is (kind == "z-finetune")
