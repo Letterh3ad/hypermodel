@@ -30,3 +30,30 @@ def test_reads_a_run_directory_with_a_history_file(tmp_path):
 def test_a_missing_or_empty_log_is_an_empty_run(tmp_path):
     run = read_run(tmp_path / "not-yet.log")
     assert run.steps == [] and run.base_acc is None
+
+
+def test_reads_retain_terms_and_final_retain_kl(tmp_path):
+    (tmp_path / "history.jsonl").write_text(
+        json.dumps({"step": 250, "loss": 0.4, "kl": 0.02, "norm": 0.1, "val_acc": 0.4}) + "\n")
+    (tmp_path / "result.json").write_text(json.dumps(
+        {"base_test_acc": 0.335, "test_acc": 0.44, "retain_kl": {"text": 0.004, "add-4": 0.03, "worst": 0.03}}))
+    run = read_run(tmp_path)
+    assert run.kl == [0.02] and run.norm == [0.1]
+    assert run.retain_kl["worst"] == 0.03
+
+
+def test_older_runs_without_retain_terms_still_load(tmp_path):
+    (tmp_path / "history.jsonl").write_text(json.dumps({"step": 250, "loss": 0.4, "val_acc": 0.4}) + "\n")
+    run = read_run(tmp_path)
+    assert run.kl == [None] and run.retain_kl is None
+
+
+def test_discovers_edit_runs_newest_last(tmp_path):
+    import os
+    from hypermodel.watch import discover
+    for i, name in enumerate(["edit-none-s0", "edit-none-retain-s0", "observer-20k"]):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "history.jsonl").write_text("")
+        os.utime(d / "history.jsonl", (i, i))
+    assert [p.name for p in discover(tmp_path)] == ["edit-none-s0", "edit-none-retain-s0"]

@@ -9,6 +9,20 @@ from torch import nn
 from hypermodel.adapter import ModelAdapter
 
 
+class EditLog:
+    """Squared edit outputs seen while a bank is applied, for the edit-norm penalty."""
+
+    def __init__(self):
+        self._sq: list[torch.Tensor] = []
+
+    def add(self, delta: torch.Tensor) -> None:
+        self._sq.append(delta.float().pow(2).mean())
+
+    def norm(self) -> torch.Tensor:
+        """Mean squared edit per output element, averaged over hooked writer calls."""
+        return torch.stack(self._sq).mean() if self._sq else torch.zeros(())
+
+
 class LoRABank(nn.Module):
     """Writer l gains sum_e g[b, l, e] * (alpha / rank) * (h @ V[l, e]) @ U[l, e]^T, h being its input."""
 
@@ -42,12 +56,18 @@ class LoRABank(nn.Module):
         if g.shape[-2:] != self.shape:
             raise ValueError(f"mixing shape {tuple(g.shape)} does not end in {self.shape}")
 
+        log = EditLog()
+
         def hook(l):
-            return lambda _m, inp, out: out + self.delta(l, inp[0], g[..., l, :])
+            def fn(_m, inp, out):
+                d = self.delta(l, inp[0], g[..., l, :])
+                log.add(d)
+                return out + d
+            return fn
 
         handles = [w.register_forward_hook(hook(l)) for l, w in enumerate(self._writers)]
         try:
-            yield
+            yield log
         finally:
             for h in handles:
                 h.remove()

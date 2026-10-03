@@ -102,3 +102,18 @@
 **Context**: Plain-LoRA baseline needed fixed hyperparameters before the conditioned variants reuse the loop.
 **Decision**: Target is answer + newline (prompt masked), matching the scorer's stop. AdamW lr 1e-3, batch 16, alpha 16 (scale 2), constant mixing initialised to 1, V Kaiming, U zero. Early stopping scores 1000 sampled val questions every 250 steps, keeps the strictly best checkpoint, patience 4, cap 3000 steps. Every variant uses the same settings.
 **Alternatives**: Stop on val loss (cheaper, but accuracy is the measured outcome); tune per variant (would confound the ablation).
+
+## 2026-10-03 - Retain KL bar applies per source; training KL balances sources
+**Context**: A paragraph has ~10x the scored tokens of an arithmetic question, so the pooled per-token KL is mostly text. Plain LoRA trained without retain scored pooled 0.018 (passes 0.05) while add-4 was 0.081 and mod-3x1 0.111.
+**Decision**: (F's call) The 0.05 nats/token bar applies to each retain source (text, add-4, mod-3x1); `evaluate_retain` reports each and `worst`. The training KL term is the mean of per-source token means, on stratified batches of 3 items per source. Edit-norm gamma defaults to 0.1 (about 4% of answer CE at the plain-LoRA edit size).
+**Alternatives**: Pooled tokens (bar tests almost nothing); mean of sources (lets one source exceed 0.05).
+
+## 2026-10-03 - Step 3 conditioning pipeline (ticket 03)
+**Context**: The editor needs z for every input it edits, including retain items, and the spec's raw+contrastive observer was never saved.
+**Decision**: z variants use the step 2 `raw` observer (z AUROC 0.910, same as `all`, no SAE). The unedited pass is deterministic, so conditioning inputs are computed once per input: task questions reuse the phase 1 traces, retain items are traced at startup. Arithmetic retain items are read at their operands; generic text at its last token in all three slots. Every conditioned mixer is g0 + head(c) with a zero-init last layer, so it starts exactly at plain LoRA. The fine-tuned observer trains at lr / 10 and its correctness head is frozen. Question features use the phase 1 baseline schema over all arithmetic items plus an is-text flag (text rows otherwise 0).
+**Alternatives**: Retrain a raw+contrastive observer first; recompute traces every step (same values, slower); skip conditioning for retain items (would hide what the editor does off-task).
+
+## 2026-10-03 - Retain arithmetic pool is seed-independent
+**Context**: Retain test items are fixed (seed 0); training for seeds 1 and 2 drew their arithmetic pool with their own seed, which could overlap the test tail.
+**Decision**: One pool per setting, generated with seed 0: train takes the head, test the tail, for every seed. Seed varies only the generic-text sample.
+**Alternatives**: Per-seed test sets (verdict rows would differ across seeds).
