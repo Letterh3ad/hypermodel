@@ -79,3 +79,8 @@
 **Context**: Tickets 03-04 on mul-2x3: question-only baseline AUROC 0.896, raw residuals 0.900, baseline+raw 0.900, 4 contrastive dims 0.886. With greedy decoding correctness is nearly a function of the question, so "beat the baseline by 0.05" cannot pass however good the observer is.
 **Decision**: Step 2 passes if z predicts correctness (AUROC >= 0.75) and is within 0.01 of the best question-only baseline, i.e. the observer recovers unaided what was hand-crafted. Step 3 must ablate the editor conditioned on z vs. on baseline features vs. unconditioned; if z does not help editing, the observer has failed.
 **Alternatives**: Keep the bar and fail on arithmetic; switch to sampled decoding for noisier outcomes.
+
+## 2026-10-03 - Step 2 verdict is a non-inferiority test on 20k traces
+**Context**: Gate round 1: the 3-seed spread ignored test-sampling error (1000 test rows); paired bootstrap of z minus baseline had CIs down to -0.025, and an observer-sized MLP on question-only features matched z.
+**Decision**: z is scored by its own head on test rows. Pass needs AUROC >= 0.75 and, for every seed, the lower 95% paired-bootstrap bound of (z - linear baseline) >= -0.01. Report the MLP-on-baseline control. Traces re-recorded at 20k (4000 test rows) to halve the CI width. Splits keyed so a*b and b*a share a side; contrastive bases and SAE latent choice fit on train only.
+**Alternatives**: Mean over seeds against a point threshold (what round 1 broke).
