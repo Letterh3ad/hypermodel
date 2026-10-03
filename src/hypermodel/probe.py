@@ -112,7 +112,7 @@ def _write_sweep(rows: list[dict], out_dir: Path) -> None:
     plt.close(fig)
 
 
-def feature_sets(ts, pool) -> dict[str, np.ndarray]:
+def feature_sets(ts, pool, sae_repo: str | None = None) -> dict[str, np.ndarray]:
     from hypermodel.contrastive import contrastive_basis, difficulty_strata
     from hypermodel.trace import POSITIONS
 
@@ -138,6 +138,26 @@ def feature_sets(ts, pool) -> dict[str, np.ndarray]:
     last = resid[:, :, POSITIONS.index("last")].reshape(n, -1)
     named["baseline+raw/last"] = np.concatenate([named["baseline"], last], 1)
     named["baseline+contrastive"] = np.concatenate([named["baseline"], named["contrastive/strat-k4/all"]], 1)
+    if sae_repo:
+        named.update(_sae_features(ts, pool, resid, sae_repo))
+        named["baseline+sae"] = np.concatenate([named["baseline"], named["sae/all"]], 1)
+    return named
+
+
+def _sae_features(ts, pool, resid, repo) -> dict[str, np.ndarray]:
+    from hypermodel.sae import TopKSAE, active_latents
+    from hypermodel.trace import POSITIONS
+
+    named, parts = {}, []
+    for i, layer in enumerate(ts.meta["layers"]):
+        sae = TopKSAE.from_hub(repo, layer)
+        for j, pos in enumerate(POSITIONS):
+            acts = sae.encode(resid[:, i, j])
+            # Latent choice uses train+val rows only.
+            feats = acts[:, active_latents(acts, pool)]
+            named[f"sae/L{layer}/{pos}"] = feats
+            parts.append(feats)
+    named["sae/all"] = np.concatenate(parts, 1)
     return named
 
 
@@ -151,6 +171,7 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--skip-sweep", action="store_true")
     p.add_argument("--only", help="substring filter on feature names")
+    p.add_argument("--sae", help="HF repo of sparsify SAEs for the traced layers, e.g. gzxiong/sae-qwen3-0.6b")
     args = p.parse_args()
     ts = TraceSet.load(args.traces)
     y, test = ts.labels, ts.mask("test")
@@ -159,7 +180,7 @@ def main():
     if not args.skip_sweep:
         rows += [{"feature": f"sweep/L{r['layer']}", **r}
                  for r in layer_sweep(ts.last_all, y, pool, test, out_dir=args.out)]
-    for name, X in feature_sets(ts, pool).items():
+    for name, X in feature_sets(ts, pool, args.sae).items():
         if args.only and args.only not in name:
             continue
         mean, std = probe_auroc(X, y, pool, test)

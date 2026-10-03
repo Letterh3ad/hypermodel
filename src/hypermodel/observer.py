@@ -90,13 +90,16 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--k", type=int, default=64)
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--inputs", nargs="+", default=["raw/all", "contrastive/strat-k4/all"],
+                   help="feature sets to concatenate, e.g. raw/all contrastive/strat-k4/all sae/all")
+    p.add_argument("--sae", help="HF repo of sparsify SAEs, needed when inputs include sae/all")
     args = p.parse_args()
     ts = TraceSet.load(args.traces)
     y = ts.labels
     train, val, test = ts.mask("train"), ts.mask("val"), ts.mask("test")
     pool = train | val
-    named = feature_sets(ts, pool)
-    X = np.concatenate([named["raw/all"], named["contrastive/strat-k4/all"]], 1)
+    named = feature_sets(ts, pool, args.sae)
+    X = np.concatenate([named[name] for name in args.inputs], 1)
     base, _ = probe_auroc(named["baseline"], y, pool, test)
     args.out.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -106,7 +109,7 @@ def main():
         mean, _ = probe_auroc(z, y, pool, test, seeds=(seed,))
         obs.save(args.out / f"observer-s{seed}.pt")
         np.save(args.out / f"z-s{seed}.npy", z)
-        rows.append({"seed": seed, "k": args.k, "z_auroc": mean})
+        rows.append({"seed": seed, "k": args.k, "inputs": args.inputs, "z_auroc": mean})
         print(f"seed {seed}: z AUROC {mean:.3f}", flush=True)
     z_mean = float(np.mean([r["z_auroc"] for r in rows]))
     verdict = {"z_auroc_mean": z_mean, "z_auroc_std": float(np.std([r["z_auroc"] for r in rows])),
