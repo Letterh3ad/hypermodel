@@ -84,3 +84,61 @@
 **Context**: Gate round 1: the 3-seed spread ignored test-sampling error (1000 test rows); paired bootstrap of z minus baseline had CIs down to -0.025, and an observer-sized MLP on question-only features matched z.
 **Decision**: z is scored by its own head on test rows. Pass needs AUROC >= 0.75 and, for every seed, the lower 95% paired-bootstrap bound of (z - linear baseline) >= -0.01. Report the MLP-on-baseline control. Traces re-recorded at 20k (4000 test rows) to halve the CI width. Splits keyed so a*b and b*a share a side; contrastive bases and SAE latent choice fit on train only.
 **Alternatives**: Mean over seeds against a point threshold (what round 1 broke).
+
+## 2026-10-03 - Step 3 editor: shared LoRA bank with z-conditioned mixing
+**Context**: A raw hypernetwork emitting U, V (rank 8, ~32k outputs per layer) is large and unstable.
+**Decision**: Per edited layer, a learned bank of E rank-r LoRA experts on the MLP output projection; the editor maps the conditioning vector to per-question mixing weights and scales. Unconditioned mode (constant mixing) is plain LoRA at matched parameter count and serves as the LoRA baseline. Edits are transient (per question, discarded).
+**Alternatives**: Raw hypernetwork to U, V (MEND-style).
+
+## 2026-10-03 - Step 3 placement, observer training, retain set
+**Decision**: Edit layers 12, 15, 18, 21 at rank 8 (later tunable in step 5). Observer initialised from step 2 and fine-tuned end to end at a lower LR; frozen-observer variant as ablation. Retain set: generic text snippets plus add-4 and mod-3x1 questions.
+**Alternatives**: Edit all layers; frozen observer only; text-only retain set.
+
+## 2026-10-03 - Step 3 pass bar
+**Decision**: On held-out mul-2x3 (4000 test questions, 3 seeds): z-conditioned editor raises accuracy above base (33%); retain KL <= 0.05 nats/token; z-conditioned beats both plain LoRA (unconditioned) and question-feature-conditioned with paired-bootstrap CI excluding zero. Failing the last is a valid research result, not something to tune away.
+**Alternatives**: Accuracy gain alone (would not test the observer).
+
+## 2026-10-03 - Step 3 training defaults (ticket 01)
+**Context**: Plain-LoRA baseline needed fixed hyperparameters before the conditioned variants reuse the loop.
+**Decision**: Target is answer + newline (prompt masked), matching the scorer's stop. AdamW lr 1e-3, batch 16, alpha 16 (scale 2), constant mixing initialised to 1, V Kaiming, U zero. Early stopping scores 1000 sampled val questions every 250 steps, keeps the strictly best checkpoint, patience 4, cap 3000 steps. Every variant uses the same settings.
+**Alternatives**: Stop on val loss (cheaper, but accuracy is the measured outcome); tune per variant (would confound the ablation).
+
+## 2026-10-03 - Retain KL bar applies per source; training KL balances sources
+**Context**: A paragraph has ~10x the scored tokens of an arithmetic question, so the pooled per-token KL is mostly text. Plain LoRA trained without retain scored pooled 0.018 (passes 0.05) while add-4 was 0.081 and mod-3x1 0.111.
+**Decision**: (F's call) The 0.05 nats/token bar applies to each retain source (text, add-4, mod-3x1); `evaluate_retain` reports each and `worst`. The training KL term is the mean of per-source token means, on stratified batches of 3 items per source. Edit-norm gamma defaults to 0.1 (about 4% of answer CE at the plain-LoRA edit size).
+**Alternatives**: Pooled tokens (bar tests almost nothing); mean of sources (lets one source exceed 0.05).
+
+## 2026-10-03 - Step 3 conditioning pipeline (ticket 03)
+**Context**: The editor needs z for every input it edits, including retain items, and the spec's raw+contrastive observer was never saved.
+**Decision**: z variants use the step 2 `raw` observer (z AUROC 0.910, same as `all`, no SAE). The unedited pass is deterministic, so conditioning inputs are computed once per input: task questions reuse the phase 1 traces, retain items are traced at startup. Arithmetic retain items are read at their operands; generic text at its last token in all three slots. Every conditioned mixer is g0 + head(c) with a zero-init last layer, so it starts exactly at plain LoRA. The fine-tuned observer trains at lr / 10 and its correctness head is frozen. Question features use the phase 1 baseline schema over all arithmetic items plus an is-text flag (text rows otherwise 0).
+**Alternatives**: Retrain a raw+contrastive observer first; recompute traces every step (same values, slower); skip conditioning for retain items (would hide what the editor does off-task).
+
+## 2026-10-03 - Retain arithmetic pool is seed-independent
+**Context**: Retain test items are fixed (seed 0); training for seeds 1 and 2 drew their arithmetic pool with their own seed, which could overlap the test tail.
+**Decision**: One pool per setting, generated with seed 0: train takes the head, test the tail, for every seed. Seed varies only the generic-text sample.
+**Alternatives**: Per-seed test sets (verdict rows would differ across seeds).
+
+## 2026-10-03 - Hidden-state router baseline (MoLE-style)
+**Context**: A reviewer would ask whether the observer's separate unedited read (z) beats the standard mixture-of-LoRA-experts recipe, a router reading the current hidden state in the same pass.
+**Decision**: Fifth conditioning kind `router`: per edited layer and per token, g = g0 + W_l h + c_l, h being that writer's own input (the MLP activation fed to down_proj) in the edited pass. W, c zero-init so it starts at plain LoRA; linear and unnormalised like the other mixers, so g can be any sign. `LoRABank.apply` takes either a mixing tensor or a router called in each hook as router(l, h) -> [B, T, E]; a mixer's output is passed to apply as before, so call sites are unchanged. Cached generation routes each new token on its own h. Qwen3-0.6B (d_in 3072, 4 layers, E=8): 98,368 router params (W 98,304, g0 32, c 32).
+**Alternatives**: Softmax or top-k gating (changes the edit scale versus the other kinds); routing on the residual stream (another hook site); route once per sequence from the prompt (not the standard baseline).
+
+## 2026-10-03 - Editor question features exclude the answer's magnitude
+**Context**: Phase 1's baseline features include log10(answer), harmless for predicting correctness but answer-derived information when fed to an editor (float32 resolves a 5-digit answer).
+**Decision**: (F's call) The features variant uses operand-only features (`baseline_features(..., with_answer=False)`); phase 1 keeps the original set. The first features run was killed 5 min in and restarted.
+**Alternatives**: Keep it as a stronger-than-fair control.
+
+## 2026-10-03 - Step 3 ablation runs to a fixed step cap
+**Context:** Seed-0 features run early-stopped at 2250 (patience 4) mid-learning; plain LoRA hit the 3000 cap still rising. Val (1000 q) noise is ~1 pt, so patience 4 cut variants unevenly.
+**Decision:** Ticket 04 runs every variant with `--max-steps 5000 --patience 20` (cap decides); best-val checkpoint restored as before.
+**Alternatives:** keep patience 4 (unfair to slow starters); drop early stopping code (unneeded, high patience is equivalent).
+
+## 2026-10-04 - Router gates read unit-norm writer inputs
+**Context:** Seed-0 router run never learned (test 0.334 = base): gates were `g0 + h @ W + c` on raw Qwen MLP activations, so small W steps swung per-token gates wildly.
+**Decision:** `RouterMixer.route` L2-normalises h before `@ W` (parameter-free), bounding each W step's effect on a gate by about lr * sqrt(d_in). Same LR as the rest.
+**Alternatives:** lower router LR (still scale-dependent per layer); bounded gates via tanh/softmax (changes the plain-LoRA starting point and MoLE comparison); RMSNorm (same direction, sqrt(d_in) larger steps).
+
+## 2026-10-04 - Shuffled-z control and trimmed step 3 ablation
+**Context:** Seed 0: z-finetune ties plain LoRA (0.467 vs 0.468, paired CI [-1.1, +1.0] pt) with ~10x lower retain KL, but has 3.4M trainable params vs 1.05M. Features and z-frozen trail. 15 runs at 5000 steps is ~2.5 GPU-days.
+**Decision:** Add `--conditioning z-shuffled`: z-finetune with trace rows permuted (fixed seed) within task rows and within retain rows, so capacity and input distribution match but per-input information is gone. Ticket 04 trimmed to: router recheck (seed 0), z-shuffled + z-finetune seed 0 at 5000, then plain + z-finetune seeds 1-2.
+**Alternatives:** shuffle across task and retain rows (also removes arithmetic-vs-text identity, which features already give, so it would conflate two effects); full 15-run grid (mostly confirms no accuracy gain).

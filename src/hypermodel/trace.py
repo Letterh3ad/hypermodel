@@ -17,22 +17,30 @@ POSITIONS = ("a", "b", "last")  # last digit of each operand, and the "=" the an
 SPLITS = ("train", "val", "test")
 
 
-def operand_token_positions(tok, prefix: str, questions: list[Question]):
-    """Tokenize prefix + prompt (left padded) and locate POSITIONS by character offsets."""
+def operand_chars(prefix: str, q: Question) -> tuple[int, int]:
+    """Character index of the last digit of each operand in prefix + prompt."""
+    a_end = len(prefix) + len(str(q.a)) - 1
+    return a_end, a_end + 1 + len(str(q.b))
+
+
+def token_positions(tok, texts: list[str], operands: list[tuple[int, int] | None]):
+    """Tokenize texts (left padded) and locate POSITIONS; a text without operands reads its last token throughout."""
     require_left_padding(tok)
-    enc = tok([prefix + q.prompt for q in questions], return_tensors="pt", padding=True,
-              return_offsets_mapping=True)
+    enc = tok(texts, return_tensors="pt", padding=True, return_offsets_mapping=True)
     offsets = enc.pop("offset_mapping")
-    pos = torch.empty(len(questions), len(POSITIONS), dtype=torch.long)
-    for i, q in enumerate(questions):
-        a_end = len(prefix) + len(str(q.a)) - 1
-        b_end = a_end + 1 + len(str(q.b))
+    last = enc.input_ids.shape[1] - 1
+    pos = torch.full((len(texts), len(POSITIONS)), last, dtype=torch.long)
+    for i, chars in enumerate(operands):
         starts, ends = offsets[i, :, 0], offsets[i, :, 1]
         real = enc.attention_mask[i].bool()
-        for j, c in enumerate((a_end, b_end)):
+        for j, c in enumerate(chars or ()):
             pos[i, j] = int(torch.nonzero(real & (starts <= c) & (c < ends))[0])
-        pos[i, 2] = enc.input_ids.shape[1] - 1
     return enc, pos
+
+
+def operand_token_positions(tok, prefix: str, questions: list[Question]):
+    """Tokenize prefix + prompt (left padded) and locate POSITIONS by character offsets."""
+    return token_positions(tok, [prefix + q.prompt for q in questions], [operand_chars(prefix, q) for q in questions])
 
 
 def _split(questions: list[Question], seed: int) -> np.ndarray:
@@ -85,7 +93,9 @@ class TraceSet:
 
 
 @torch.no_grad()
-def _capture(adapter: ModelAdapter, questions, prefix, layers, batch_size):
+def capture(adapter: ModelAdapter, texts: list[str], operands: list[tuple[int, int] | None], layers,
+            batch_size: int):
+    """Residuals at POSITIONS for the given layers [N, L, P, d] and at the last token for every layer [N, n_layers, d]."""
     resid, last_all = [], []
     cur = {}
 
@@ -101,8 +111,8 @@ def _capture(adapter: ModelAdapter, questions, prefix, layers, batch_size):
 
     handles = [b.register_forward_hook(hook(l)) for l, b in enumerate(adapter.blocks())]
     try:
-        for i in range(0, len(questions), batch_size):
-            enc, pos = operand_token_positions(adapter.tokenizer, prefix, questions[i:i + batch_size])
+        for i in range(0, len(texts), batch_size):
+            enc, pos = token_positions(adapter.tokenizer, texts[i:i + batch_size], operands[i:i + batch_size])
             enc = enc.to(adapter.device)
             cur.clear()
             cur["pos"] = pos.to(adapter.device)
@@ -120,7 +130,8 @@ def _capture(adapter: ModelAdapter, questions, prefix, layers, batch_size):
 def record(adapter: ModelAdapter, questions: list[Question], prefix: str, layers: list[int],
            out_dir: Path, batch_size: int = 64, seed: int = 0) -> Path:
     records = score(adapter, questions, prefix, batch_size)
-    resid, last_all = _capture(adapter, questions, prefix, layers, batch_size)
+    resid, last_all = capture(adapter, [prefix + q.prompt for q in questions],
+                              [operand_chars(prefix, q) for q in questions], layers, batch_size)
     meta = {"model": adapter.model.config.name_or_path, "dtype": str(adapter.model.dtype), "layers": list(layers),
             "n_layers": adapter.n_layers, "d_model": adapter.d_model, "seed": seed, "prefix": prefix}
     return TraceSet.write(out_dir, resid, last_all, records, _split(questions, seed), meta)

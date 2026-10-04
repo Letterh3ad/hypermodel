@@ -70,16 +70,19 @@ def _digits(n: int, width: int) -> np.ndarray:
     return out.ravel()
 
 
-def baseline_features(records: list[dict]) -> np.ndarray:
-    """Question-only features: if these predict correctness, a probe may just be reading difficulty."""
+def baseline_features(records: list[dict], with_answer: bool = True) -> np.ndarray:
+    """Question-only features: if these predict correctness, a probe may just be reading difficulty.
+
+    with_answer adds the answer's magnitude, fine for predicting correctness but a leak for an editor input."""
     wa = max(len(str(abs(r["a"]))) for r in records)
     wb = max(len(str(abs(r["b"]))) for r in records)
     ops = sorted({r["op"] for r in records})
     rows = []
     for r in records:
         a, b = abs(r["a"]), abs(r["b"])
-        scalars = [len(str(a)), len(str(b)), math.log10(a + 1), math.log10(b + 1),
-                   math.log10(abs(r["answer"]) + 1)]
+        scalars = [len(str(a)), len(str(b)), math.log10(a + 1), math.log10(b + 1)]
+        if with_answer:
+            scalars.append(math.log10(abs(r["answer"]) + 1))
         lead = np.zeros(20, np.float32)
         lead[int(str(a)[0])] = lead[10 + int(str(b)[0])] = 1
         op = np.array([r["op"] == o for o in ops], np.float32)
