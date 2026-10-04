@@ -88,7 +88,7 @@ def test_per_question_edits_survive_batched_scoring(small_lm):
     X = torch.as_tensor(X)
     bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
     with torch.no_grad():
-        bank.U.normal_(std=0.5)
+        bank.U.normal_(std=0.02)  # pythia-14m collapses to one answer for every question above ~0.05
     mixer = ConditionedMixer(bank.shape, Standardize(X.mean(0), X.std(0) + 1), X.shape[1], FeatureStore(keys, X),
                              key=lambda q: prefix + q.prompt)
     with torch.no_grad():
@@ -108,8 +108,8 @@ def test_per_token_routing_survives_batched_scoring(small_lm):
     bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
     mixer = RouterMixer(bank.shape, bank.d_in)
     with torch.no_grad():
-        bank.U.normal_(std=0.1)
-        mixer.W.normal_(std=0.05)
+        bank.U.normal_(std=0.02)  # pythia-14m collapses to one answer for every question above ~0.05
+        mixer.W.normal_(std=1.0)  # gates read unit-norm h, so W sets their spread directly
     batched = evaluate(small_lm, bank, mixer, qs, prefix, batch_size=3)
     single = evaluate(small_lm, bank, mixer, qs, prefix, batch_size=1)
     assert [r["pred"] for r in batched] == [r["pred"] for r in single]

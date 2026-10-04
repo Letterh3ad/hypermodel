@@ -132,3 +132,8 @@
 **Context:** Seed-0 features run early-stopped at 2250 (patience 4) mid-learning; plain LoRA hit the 3000 cap still rising. Val (1000 q) noise is ~1 pt, so patience 4 cut variants unevenly.
 **Decision:** Ticket 04 runs every variant with `--max-steps 5000 --patience 20` (cap decides); best-val checkpoint restored as before.
 **Alternatives:** keep patience 4 (unfair to slow starters); drop early stopping code (unneeded, high patience is equivalent).
+
+## 2026-10-04 - Router gates read unit-norm writer inputs
+**Context:** Seed-0 router run never learned (test 0.334 = base): gates were `g0 + h @ W + c` on raw Qwen MLP activations, so small W steps swung per-token gates wildly.
+**Decision:** `RouterMixer.route` L2-normalises h before `@ W` (parameter-free), bounding each W step's effect on a gate by about lr * sqrt(d_in). Same LR as the rest.
+**Alternatives:** lower router LR (still scale-dependent per layer); bounded gates via tanh/softmax (changes the plain-LoRA starting point and MoLE comparison); RMSNorm (same direction, sqrt(d_in) larger steps).

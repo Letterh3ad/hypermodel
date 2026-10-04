@@ -101,9 +101,18 @@ def test_routed_writer_output_follows_the_per_token_formula(tiny_model):
             for t in range(5):
                 for e in range(3):
                     # LAYERS[1] is layer 2; scale = alpha / rank = 2
-                    g = mixer.g0[1, e] + torch.dot(h[b, t], mixer.W[1, :, e]) + mixer.c[1, e]
+                    u = h[b, t] / h[b, t].norm()
+                    g = mixer.g0[1, e] + torch.dot(u, mixer.W[1, :, e]) + mixer.c[1, e]
                     expected[b, t] += g * 2.0 * (h[b, t] @ bank.V[1, e]) @ bank.U[1, e].T
     assert torch.allclose(edited, expected, atol=1e-4)
+
+
+def test_router_gates_ignore_activation_scale(tiny_model):
+    # Qwen MLP activations are large; raw h @ W let small W steps swing the gates (router run 10-04 never learned)
+    _, mixer = _routed(tiny_model)
+    h = torch.randn(1, 4, mixer.W.shape[1])
+    route = mixer(None)
+    assert torch.allclose(route(0, h), route(0, 1000 * h), atol=1e-5)
 
 
 def test_router_mixes_per_token_and_trains_only_bank_and_router(tiny_model):

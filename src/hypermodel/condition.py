@@ -109,10 +109,12 @@ class ConditionedMixer(nn.Module):
 
 
 class RouterMixer(nn.Module):
-    """MoLE-style routing: g[b, t, l] = g0[l] + h[b, t] @ W[l] + c[l], h being writer l's input at token t.
+    """MoLE-style routing: g[b, t, l] = g0[l] + u[b, t] @ W[l] + c[l], u being writer l's input at token t
+    scaled to unit L2 norm.
 
     Reads the current (edited) pass, so it needs no observer or precomputed inputs. W and c start at zero,
-    so training begins at plain LoRA."""
+    so training begins at plain LoRA. Unit norm keeps a W step from moving a gate by more than about
+    lr * sqrt(d_in); on raw Qwen MLP activations the gates swung so far the router never learned."""
 
     def __init__(self, shape: tuple[int, int], d_in: int):
         super().__init__()
@@ -125,7 +127,8 @@ class RouterMixer(nn.Module):
 
     def route(self, l: int, h: torch.Tensor) -> torch.Tensor:
         """[B, T, E] mixing for writer l from its input h [B, T, d_in]."""
-        return self.g0[l] + h.to(self.W.dtype) @ self.W[l] + self.c[l]
+        u = nn.functional.normalize(h.to(self.W.dtype), dim=-1)
+        return self.g0[l] + u @ self.W[l] + self.c[l]
 
 
 class Standardize(nn.Module):
