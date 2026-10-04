@@ -11,11 +11,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 class _Layout:
     blocks: str  # dotted path from the model root to the ModuleList of decoder blocks
     mlp_out: str  # dotted path from a block to its MLP output projection
+    final_norm: str  # dotted path from the model root to the norm before the unembedding
 
 
-_LLAMA_LIKE = _Layout("model.layers", "mlp.down_proj")
+_LLAMA_LIKE = _Layout("model.layers", "mlp.down_proj", "model.norm")
 _REGISTRY = {
-    "gpt_neox": _Layout("gpt_neox.layers", "mlp.dense_4h_to_h"),
+    "gpt_neox": _Layout("gpt_neox.layers", "mlp.dense_4h_to_h", "gpt_neox.final_layer_norm"),
     "llama": _LLAMA_LIKE,
     "mistral": _LLAMA_LIKE,
     "qwen2": _LLAMA_LIKE,
@@ -50,6 +51,13 @@ class ModelAdapter:
 
     def residual_writers(self) -> list[nn.Linear]:
         return [b.get_submodule(self._layout.mlp_out) for b in self.blocks()]
+
+    def final_norm(self) -> nn.Module:
+        return self.model.get_submodule(self._layout.final_norm)
+
+    def unembedding(self) -> torch.Tensor:
+        """[vocab, d_model]: final_norm(h) @ unembedding().T are the logits."""
+        return self.model.get_output_embeddings().weight
 
 
 def load(name: str, device: str = "cuda", dtype: torch.dtype = torch.float32) -> ModelAdapter:
