@@ -60,6 +60,8 @@ accuracy, keeps retain KL at or below 0.05 nats/token on every retain source, an
 
 \* Stopped early at 2250 steps; the others ran to 5000 (`z-finetune` to 3000).
 
+![Step 3, seed 0: validation accuracy during training, and final test accuracy with worst retain KL per variant](assets/step3-seed0.png)
+
 So far nothing beats plain LoRA on accuracy. `z-finetune` ties it while answering 12% of questions
 differently and keeping about 10x less drift on unrelated inputs, but it also has 3.4x the trainable
 parameters, which is what `z-shuffled` tests. The first `router` run did not learn (fixed since, rerun pending).
