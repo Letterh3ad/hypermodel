@@ -124,7 +124,7 @@ def test_per_token_routing_survives_batched_scoring(small_lm):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune", "router"])
+@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune", "z-shuffled", "router"])
 def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypatch, kind):
     import hypermodel.retain as retain
     from hypermodel.edit_train import build_mixer, evaluate_retain, split_questions
@@ -152,4 +152,14 @@ def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypat
         assert mixer.W.abs().sum() > 0  # gradient reached the zero-initialised router
     if kind.startswith("z"):
         moved = any(not torch.equal(v, before[k]) for k, v in enc.state_dict().items() if "encoder" in k)
-        assert moved is (kind == "z-finetune")
+        assert moved is (kind != "z-frozen")
+    if kind == "z-shuffled":
+        real = build_mixer("z-finetune", bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix,
+                           obs_path).store
+        n = len(ts.records)
+        for block in (slice(0, n), slice(n, None)):  # task rows and retain rows each permuted among themselves
+            got, want = mixer.store.features[block], real.features[block]
+            assert not torch.equal(got, want)
+            assert torch.equal(got[torch.argsort(got.sum(1))], want[torch.argsort(want.sum(1))])
+        again = build_mixer("z-shuffled", bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix, obs_path)
+        assert torch.equal(again.store.features, mixer.store.features)  # same shuffle every run

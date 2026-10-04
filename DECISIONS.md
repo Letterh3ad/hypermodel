@@ -137,3 +137,8 @@
 **Context:** Seed-0 router run never learned (test 0.334 = base): gates were `g0 + h @ W + c` on raw Qwen MLP activations, so small W steps swung per-token gates wildly.
 **Decision:** `RouterMixer.route` L2-normalises h before `@ W` (parameter-free), bounding each W step's effect on a gate by about lr * sqrt(d_in). Same LR as the rest.
 **Alternatives:** lower router LR (still scale-dependent per layer); bounded gates via tanh/softmax (changes the plain-LoRA starting point and MoLE comparison); RMSNorm (same direction, sqrt(d_in) larger steps).
+
+## 2026-10-04 - Shuffled-z control and trimmed step 3 ablation
+**Context:** Seed 0: z-finetune ties plain LoRA (0.467 vs 0.468, paired CI [-1.1, +1.0] pt) with ~10x lower retain KL, but has 3.4M trainable params vs 1.05M. Features and z-frozen trail. 15 runs at 5000 steps is ~2.5 GPU-days.
+**Decision:** Add `--conditioning z-shuffled`: z-finetune with trace rows permuted (fixed seed) within task rows and within retain rows, so capacity and input distribution match but per-input information is gone. Ticket 04 trimmed to: router recheck (seed 0), z-shuffled + z-finetune seed 0 at 5000, then plain + z-finetune seeds 1-2.
+**Alternatives:** shuffle across task and retain rows (also removes arithmetic-vs-text identity, which features already give, so it would conflate two effects); full 15-run grid (mostly confirms no accuracy gain).

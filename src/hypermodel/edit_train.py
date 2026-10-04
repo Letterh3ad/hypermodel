@@ -149,12 +149,13 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     return history
 
 
-CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "router")
+CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "z-shuffled", "router")
 
 
 def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: list[RetainItem],
                 fit_items: list, prefix: str, observer: Path | None = None) -> nn.Module:
     """none: plain LoRA. features: question-only features. z-*: the step 2 observer on the unedited trace.
+    z-shuffled: z-finetune with each input's trace swapped for another's (control for z's information).
     router: per-token routing on each writer's own input in the edited pass.
 
     Conditioning inputs for every task question and retain item are computed once up front."""
@@ -184,6 +185,12 @@ def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: li
                          torch.from_numpy(np.array(ts.resid).reshape(len(ts.records), -1)))
     store.extend([key(it) for it in retain],
                  torch.as_tensor(trace_features(adapter, [obs_input(it, prefix) for it in retain], ts.meta["layers"])))
+    if kind == "z-shuffled":
+        # Same capacity and input distribution as z-finetune, no per-input information. Shuffled within task and
+        # within retain rows, so telling arithmetic from retain text is still possible (features can do that too).
+        gen = torch.Generator().manual_seed(0)
+        for lo, hi in ((0, len(ts.records)), (len(ts.records), len(store.features))):
+            store.features[lo:hi] = store.features[lo:hi][torch.randperm(hi - lo, generator=gen)]
     return ConditionedMixer(bank.shape, obs, obs.config["k"], store, key,
                             freeze_encoder=kind == "z-frozen").to(adapter.device)
 
