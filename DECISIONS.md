@@ -142,3 +142,13 @@
 **Context:** Seed 0: z-finetune ties plain LoRA (0.467 vs 0.468, paired CI [-1.1, +1.0] pt) with ~10x lower retain KL, but has 3.4M trainable params vs 1.05M. Features and z-frozen trail. 15 runs at 5000 steps is ~2.5 GPU-days.
 **Decision:** Add `--conditioning z-shuffled`: z-finetune with trace rows permuted (fixed seed) within task rows and within retain rows, so capacity and input distribution match but per-input information is gone. Ticket 04 trimmed to: router recheck (seed 0), z-shuffled + z-finetune seed 0 at 5000, then plain + z-finetune seeds 1-2.
 **Alternatives:** shuffle across task and retain rows (also removes arithmetic-vs-text identity, which features already give, so it would conflate two effects); full 15-run grid (mostly confirms no accuracy gain).
+
+## 2026-10-04 - Brain-inspired follow-up variants with pre-registered go/no-go rules
+**Context:** Step 3 seed 0 ties plain LoRA. F asked for brain-inspired ideas, then for them to be built and queued unattended after ticket 04 (F at work Tue-Fri).
+**Decision:** Three seed-0 follow-ups behind ticket 04 in one queue: z-gain (z sets a per-layer gain, neuromodulation-like) with a shuffled twin; conflict-signal observer inputs (logit-lens disagreement, entropy, margin), whose editor run happens only if the new observer beats the raw observer's AUROC with CI > 0 on every seed; sparse top-k gating, run only if z-finetune's mix spread across questions is < 0.10. Rules are fixed in tickets 05-07 before any data.
+**Alternatives:** run all variants regardless (more GPU, more forking paths); wait for F between stages (idle GPU for days); three seeds each (triples the queue; done later only for a variant that wins).
+
+## 2026-10-04 - Step 4 design: generator-grown bank with decay and archive (draft, gated on step 3)
+**Context:** Grilling with F (Q1-Q21). F wants connections generated as needed, weakened with disuse but kept reachable, and the observer's job to generate weights, not choose from a fixed bag. Step 3's mixing editor had drifted toward a bag of experts.
+**Decision:** `.scratch/phase-3-persistent/spec.md`: arithmetic task stream; a generator (hypernetwork) writes one expert per episode from the observer's view of failures plus the current bank, meta-trained on disjoint arithmetic settings; strength decay with a floor, archive instead of deletion, gated sleep every 2 episodes with replay. Build only per the spec's step 3 gate table; a tie makes the generator pilot decide.
+**Alternatives:** distil into one fixed slow adapter (kept as an ablation); SGD-grown experts with observer routing only (not a hypernetwork); an observer meta-trained on many tiny models (activations do not transfer across models).

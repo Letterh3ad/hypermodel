@@ -124,7 +124,8 @@ def test_per_token_routing_survives_batched_scoring(small_lm):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune", "z-shuffled", "router"])
+@pytest.mark.parametrize("kind", ["none", "features", "z-frozen", "z-finetune", "z-shuffled", "z-gain",
+                                  "z-gain-shuffled", "z-sparse", "router"])
 def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypatch, kind):
     import hypermodel.retain as retain
     from hypermodel.edit_train import build_mixer, evaluate_retain, split_questions
@@ -153,13 +154,41 @@ def test_every_conditioning_kind_builds_and_trains(small_lm, tmp_path, monkeypat
     if kind.startswith("z"):
         moved = any(not torch.equal(v, before[k]) for k, v in enc.state_dict().items() if "encoder" in k)
         assert moved is (kind != "z-frozen")
-    if kind == "z-shuffled":
-        real = build_mixer("z-finetune", bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix,
+    if kind.endswith("-shuffled"):
+        real = build_mixer({"z-shuffled": "z-finetune"}.get(kind, kind.removesuffix("-shuffled")), bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix,
                            obs_path).store
         n = len(ts.records)
         for block in (slice(0, n), slice(n, None)):  # task rows and retain rows each permuted among themselves
             got, want = mixer.store.features[block], real.features[block]
             assert not torch.equal(got, want)
             assert torch.equal(got[torch.argsort(got.sum(1))], want[torch.argsort(want.sum(1))])
-        again = build_mixer("z-shuffled", bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix, obs_path)
+        again = build_mixer(kind, bank, small_lm, ts, r_train + r_test, qs["train"] + r_train, prefix, obs_path)
         assert torch.equal(again.store.features, mixer.store.features)  # same shuffle every run
+
+
+@pytest.mark.slow
+def test_an_observer_with_conflict_features_drives_the_editor(small_lm, tmp_path, monkeypatch):
+    import numpy as np
+
+    import hypermodel.retain as retain
+    from hypermodel.conflict import conflict_features
+    from hypermodel.edit_train import build_mixer, split_questions
+    from hypermodel.observer import Observer
+    from hypermodel.trace import TraceSet, record
+
+    monkeypatch.setattr(retain, "_load_wikitext", lambda split: (_ for _ in ()).throw(ConnectionError()))
+    d = Difficulty("mul", 2, digits_b=3)
+    prefix = few_shot_prefix(d)
+    ts = TraceSet.load(record(small_lm, generate(d, 20, seed=0), prefix, [1, 3], tmp_path / "t", batch_size=20))
+    C = conflict_features(small_lm, ts.last_all)
+    obs_path = tmp_path / "obs.pt"
+    Observer(in_dim=2 * 3 * small_lm.d_model + C.shape[1], k=8, hidden=16).save(obs_path)
+    qs = split_questions(ts.records, ts.split)
+    r_train = retain.retain_items("train", 4, 3)
+    bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
+    mixer = build_mixer("z-finetune", bank, small_lm, ts, r_train, qs["train"] + r_train, prefix, obs_path,
+                        conflict=C)
+    assert mixer.store.features.shape[1] == 2 * 3 * small_lm.d_model + C.shape[1]
+    np.testing.assert_allclose(mixer.store.features[:20, -C.shape[1]:].numpy(), C, rtol=1e-2, atol=1e-2)
+    train(small_lm, bank, mixer, qs["train"], qs["val"], prefix, max_steps=2, batch_size=4, eval_every=2,
+          retain=r_train)

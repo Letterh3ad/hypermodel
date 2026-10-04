@@ -41,3 +41,18 @@ def test_unknown_architecture_fails_loudly():
             model_type = "nope"
     with pytest.raises(ValueError, match="nope"):
         ModelAdapter(Fake())
+
+
+def test_final_norm_and_unembedding_reproduce_the_model_logits(tiny_model):
+    a = ModelAdapter(tiny_model)
+    ids = torch.randint(0, 64, (2, 5))
+    with torch.no_grad():
+        out = tiny_model(ids, output_hidden_states=True)
+        # hidden_states[-1] already has the final norm applied; a block hook sees it before
+        last_block = {}
+        h = a.blocks()[-1].register_forward_hook(
+            lambda _m, _i, o: last_block.setdefault("h", o[0] if isinstance(o, tuple) else o))
+        tiny_model(ids)
+        h.remove()
+        logits = a.final_norm()(last_block["h"]) @ a.unembedding().T
+    assert torch.allclose(logits, out.logits, atol=1e-5)

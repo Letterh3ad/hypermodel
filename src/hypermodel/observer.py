@@ -116,6 +116,10 @@ def main():
     p.add_argument("--inputs", nargs="+", default=["raw/all", "contrastive/strat-k4/all"],
                    help="feature sets to concatenate, e.g. raw/all contrastive/strat-k4/all sae/all")
     p.add_argument("--sae", help="HF repo of sparsify SAEs, needed when inputs include sae/all")
+    p.add_argument("--conflict", type=Path, help="conflict.npy (hypermodel.conflict): adds the conflict feature set")
+    p.add_argument("--reference", type=Path,
+                   help="observer dir to beat: paired CI of this observer minus its observer-s<seed>.pt, per seed")
+    p.add_argument("--reference-inputs", nargs="+", default=["raw/all"])
     args = p.parse_args()
     if any(name.startswith("sae") for name in args.inputs) and not args.sae:
         p.error("--inputs with sae features needs --sae <repo>")
@@ -123,12 +127,23 @@ def main():
     y = ts.labels
     train, val, test = ts.mask("train"), ts.mask("val"), ts.mask("test")
     named = feature_sets(ts, train, args.sae)
-    X = np.concatenate([named[name] for name in args.inputs], 1)
     B = named["baseline"]
+    if args.conflict:
+        named["conflict"] = np.load(args.conflict)
+        named["baseline+conflict"] = np.concatenate([B, named["conflict"]], 1)
+    X = np.concatenate([named[name] for name in args.inputs], 1)
+
+    def linear(F):
+        l2 = max(L2_GRID, key=lambda v: auroc(probe_scores(F, y, train, val, v), y[val]))
+        return probe_scores(F, y, train, test, l2)
+
     # Linear baseline with l2 chosen on val, plus an observer-sized MLP on the same question-only features.
-    l2 = max(L2_GRID, key=lambda v: auroc(probe_scores(B, y, train, val, v), y[val]))
-    base_scores = probe_scores(B, y, train, test, l2)
+    base_scores = linear(B)
     base = auroc(base_scores, y[test])
+    extra = {}
+    if args.conflict:
+        # Does the model's own processing add anything to the question, before any observer is involved?
+        extra["question_plus_conflict_ci"] = paired_auroc_ci(linear(named["baseline+conflict"]), base_scores, y[test])
     mlp_base = auroc(train_observer(B, y, train, val, k=args.k, seed=0).predict(B[test]), y[test])
     print(f"baseline linear {base:.3f}, baseline MLP {mlp_base:.3f}", flush=True)
     args.out.mkdir(parents=True, exist_ok=True)
@@ -143,13 +158,19 @@ def main():
         np.save(args.out / f"z-s{seed}.npy", obs.encode(X))
         rows.append({"seed": seed, "k": args.k, "inputs": args.inputs, "z_auroc": a,
                      "diff_vs_baseline_ci": [lo, hi]})
-        print(f"seed {seed}: z AUROC {a:.3f}, z - baseline 95% CI [{lo:+.3f}, {hi:+.3f}]", flush=True)
+        if args.reference:
+            ref = Observer.load(args.reference / f"observer-s{seed}.pt")
+            R = np.concatenate([named[name] for name in args.reference_inputs], 1)
+            rows[-1]["diff_vs_reference_ci"] = paired_auroc_ci(scores, ref.predict(R[test]), y[test], seed=seed)
+        print(json.dumps(rows[-1]), flush=True)
     aucs = [r["z_auroc"] for r in rows]
     verdict = {"z_auroc_mean": float(np.mean(aucs)), "z_auroc_std": float(np.std(aucs)),
                "baseline_auroc": base, "baseline_mlp_auroc": mlp_base, "n_test": int(test.sum()),
-               "margin": MARGIN,
+               "margin": MARGIN, **extra,
                # Non-inferiority: every seed's CI must clear -MARGIN.
                "pass": min(aucs) >= 0.75 and all(r["diff_vs_baseline_ci"][0] >= -MARGIN for r in rows)}
+    if args.reference:
+        verdict["beats_reference"] = all(r["diff_vs_reference_ci"][0] > 0 for r in rows)
     rows.append(verdict)
     (args.out / "observer.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(json.dumps(verdict))

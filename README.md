@@ -84,6 +84,7 @@ them. One 8 GB GPU is enough for everything above. Set `CUDA_VISIBLE_DEVICES=-1`
 
 `src/hypermodel/`: `arithmetic` (task and difficulty dial), `adapter` (model-agnostic hooks), `scoring`,
 `trace`, `probe` / `contrastive` / `sae` / `observer` (step 2), `editor` (LoRA bank), `condition` (mixers),
-`retain` (retain set and KL), `edit_train` (step 3 train/eval CLI), `watch`.
+`retain` (retain set and KL), `edit_train` (step 3 train/eval CLI), `conflict` (logit-lens conflict signals),
+`mix_usage` (how much a conditioned mix varies), `decide` (pre-registered queue rules), `watch`.
 
 Design decisions and their alternatives are logged in [`DECISIONS.md`](DECISIONS.md).
