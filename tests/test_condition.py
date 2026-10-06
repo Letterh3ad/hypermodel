@@ -117,3 +117,51 @@ def test_question_features_carry_nothing_derived_from_the_answer():
                               RetainItem("1234+5678=6912\n", 0, "add-4"), RetainItem("1234+5678=1\n", 0, "add-4")], "")
     np.testing.assert_array_equal(X[0], X[1])
     np.testing.assert_array_equal(X[2], X[3])
+
+
+def _trained(mode, shape=(2, 4), **kw):
+    import torch
+    from hypermodel.condition import ConditionedMixer
+    store, keys = _store()
+    mixer = ConditionedMixer(shape, torch.nn.Linear(6, 5), 5, store, key=lambda it: it.text, mode=mode, **kw)
+    with torch.no_grad():
+        mixer.head[-1].weight.normal_()
+    return mixer, keys
+
+
+@pytest.mark.parametrize("mode", ["gain", "topk"])
+def test_untrained_gain_and_full_topk_are_plain_lora(mode):
+    import torch
+    from hypermodel.condition import ConditionedMixer
+    store, keys = _store()
+    mixer = ConditionedMixer((2, 4), torch.nn.Linear(6, 5), 5, store, key=lambda it: it.text, mode=mode, top_k=4)
+    assert torch.allclose(mixer.eval()(_items(keys)), torch.ones(4, 2, 4))
+
+
+def test_gain_scales_a_layer_without_changing_its_expert_ratios():
+    import torch
+    mixer, keys = _trained("gain")
+    with torch.no_grad():
+        mixer.g0.uniform_(0.5, 2)
+    ratio = mixer(_items(keys)) / mixer.g0
+    assert torch.allclose(ratio, ratio[..., :1].expand_as(ratio))
+    assert not torch.allclose(ratio[0], ratio[1])
+    assert mixer.head[-1].out_features == 2  # one gain per layer
+
+
+def test_topk_keeps_exactly_k_experts_weighted_to_k():
+    import torch
+    mixer, keys = _trained("topk", top_k=2)
+    g = mixer.eval()(_items(keys))
+    assert ((g != 0).sum(-1) == 2).all()
+    assert torch.allclose(g.sum(-1), torch.full((4, 2), 2.0))
+    assert torch.equal(g, mixer(_items(keys)))  # deterministic in eval
+
+
+def test_topk_explores_every_expert_while_training():
+    import torch
+    torch.manual_seed(0)
+    mixer, keys = _trained("topk", top_k=1)
+    mixer.train()
+    used = sum((mixer(_items(keys)) != 0).sum((0, 1)) for _ in range(50))
+    assert (used > 0).all()

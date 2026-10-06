@@ -149,18 +149,32 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     return history
 
 
-CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "z-shuffled", "router")
+def feature_table(ts, retain: list[RetainItem], prefix: str) -> tuple[list[str], np.ndarray]:
+    """Question-only features over every task question and retain item; the schema (ops, digit widths) depends on
+    this whole set, so a saved features run is only rebuilt from the same one."""
+    from hypermodel.condition import question_features
+    return question_features([Question(r["a"], r["b"], r["op"], r["answer"]) for r in ts.records] + retain, prefix)
+
+
+def retain_for(seed: int, n_text: int, n_arith: int) -> tuple[list[RetainItem], list[RetainItem]]:
+    return retain_items("train", n_text, n_arith, seed), retain_items("test", *RETAIN_TEST)
+
+
+CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "z-shuffled", "z-gain", "z-gain-shuffled", "z-sparse",
+                "router")
 
 
 def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: list[RetainItem],
-                fit_items: list, prefix: str, observer: Path | None = None) -> nn.Module:
-    """none: plain LoRA. features: question-only features. z-*: the step 2 observer on the unedited trace.
-    z-shuffled: z-finetune with each input's trace swapped for another's (control for z's information).
+                fit_items: list, prefix: str, observer: Path | None = None, top_k: int = 2,
+                conflict: np.ndarray | None = None) -> nn.Module:
+    """none: plain LoRA. features: question-only features. z-*: the step 2 observer on the unedited trace,
+    fine-tuned unless z-frozen. z-gain: z sets one gain per layer, not the expert mix. z-sparse: z picks top_k
+    experts. *-shuffled: each input's trace swapped for another's (control for z's information).
     router: per-token routing on each writer's own input in the edited pass.
 
-    Conditioning inputs for every task question and retain item are computed once up front."""
-    from hypermodel.condition import (ConditionedMixer, FeatureStore, RouterMixer, Standardize, obs_input,
-                                      question_features, trace_features)
+    conflict: per-task-row conflict features (hypermodel.conflict), appended to the observer input; retain items
+    get theirs traced now. Conditioning inputs for every task question and retain item are computed once up front."""
+    from hypermodel.condition import ConditionedMixer, FeatureStore, RouterMixer, Standardize, obs_input, trace_features
     if kind not in CONDITIONING:
         raise ValueError(f"unknown conditioning {kind!r}")
     if kind == "none":
@@ -168,9 +182,8 @@ def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: li
     if kind == "router":
         return RouterMixer(bank.shape, bank.d_in).to(adapter.device)
     key = lambda it: obs_input(it, prefix).text  # noqa: E731
-    questions = [Question(r["a"], r["b"], r["op"], r["answer"]) for r in ts.records]
     if kind == "features":
-        keys, X = question_features(questions + retain, prefix)
+        keys, X = feature_table(ts, retain, prefix)
         X = torch.as_tensor(X)
         fit = X[[keys.index(key(it)) for it in fit_items]]
         sd = fit.std(0)
@@ -181,18 +194,22 @@ def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: li
     obs = Observer.load(observer, adapter.device)
     obs.head.requires_grad_(False)  # the step 2 correctness head is not part of the editor
     # Task traces were recorded by phase 1 with this model; retain items are traced now.
-    store = FeatureStore([prefix + r["prompt"] for r in ts.records],
-                         torch.from_numpy(np.array(ts.resid).reshape(len(ts.records), -1)))
+    task = np.array(ts.resid).reshape(len(ts.records), -1)
+    if conflict is not None:
+        task = np.concatenate([task, conflict.astype(task.dtype)], 1)
+    store = FeatureStore([prefix + r["prompt"] for r in ts.records], torch.from_numpy(task))
     store.extend([key(it) for it in retain],
-                 torch.as_tensor(trace_features(adapter, [obs_input(it, prefix) for it in retain], ts.meta["layers"])))
-    if kind == "z-shuffled":
+                 torch.as_tensor(trace_features(adapter, [obs_input(it, prefix) for it in retain], ts.meta["layers"],
+                                                conflict=conflict is not None)))
+    if kind.endswith("-shuffled"):
         # Same capacity and input distribution as z-finetune, no per-input information. Shuffled within task and
         # within retain rows, so telling arithmetic from retain text is still possible (features can do that too).
         gen = torch.Generator().manual_seed(0)
         for lo, hi in ((0, len(ts.records)), (len(ts.records), len(store.features))):
             store.features[lo:hi] = store.features[lo:hi][torch.randperm(hi - lo, generator=gen)]
-    return ConditionedMixer(bank.shape, obs, obs.config["k"], store, key,
-                            freeze_encoder=kind == "z-frozen").to(adapter.device)
+    mode = {"z-gain": "gain", "z-gain-shuffled": "gain", "z-sparse": "topk"}.get(kind, "mix")
+    return ConditionedMixer(bank.shape, obs, obs.config["k"], store, key, freeze_encoder=kind == "z-frozen",
+                            mode=mode, top_k=top_k).to(adapter.device)
 
 
 def split_questions(records: list[dict], split) -> dict[str, list[Question]]:
@@ -223,9 +240,14 @@ def main():
     p.add_argument("--conditioning", choices=CONDITIONING, default="none")
     p.add_argument("--observer", type=Path, help="default: runs/observer-20k/raw/observer-s<seed>.pt")
     p.add_argument("--encoder-lr", type=float, help="fine-tuned observer LR; default lr / 10")
+    p.add_argument("--top-k", type=int, default=2, help="experts per question for z-sparse")
+    p.add_argument("--conflict", action="store_true",
+                   help="observer also reads <traces>/conflict.npy; pass an observer trained with it")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
+    if args.conflict and not args.conditioning.startswith("z"):
+        p.error("--conflict only applies to observer (z-*) conditioning")
 
     ts = TraceSet.load(args.traces)
     qs = split_questions(ts.records, ts.split)
@@ -234,11 +256,11 @@ def main():
     torch.manual_seed(args.seed)
     adapter = load(ts.meta["model"], args.device)
     bank = LoRABank(adapter, args.layers, args.experts, args.rank, args.alpha)
-    retain_train = retain_items("train", args.retain_text, args.retain_arith, args.seed)
-    retain_test = retain_items("test", *RETAIN_TEST)
+    retain_train, retain_test = retain_for(args.seed, args.retain_text, args.retain_arith)
     observer = args.observer or Path(f"runs/observer-20k/raw/observer-s{args.seed}.pt")
     mixer = build_mixer(args.conditioning, bank, adapter, ts, retain_train + retain_test,
-                        qs["train"] + retain_train, prefix, observer)
+                        qs["train"] + retain_train, prefix, observer, args.top_k,
+                        np.load(args.traces / "conflict.npy") if args.conflict else None)
     n_params = sum(p.numel() for p in [*bank.parameters(), *mixer.parameters()] if p.requires_grad)
     print(f"{args.conditioning}: {n_params:,} trainable params, base test acc {base_acc:.3f}", flush=True)
 

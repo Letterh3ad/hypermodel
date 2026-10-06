@@ -79,16 +79,34 @@ class FeatureStore:
         self.features = torch.cat([self.features, features[new].to(self.features.dtype)])
 
 
+def sparse_topk(logits: torch.Tensor, k: int, noise: bool) -> torch.Tensor:
+    """k experts per row, weighted k * softmax over the chosen ones (all 1 at equal logits).
+
+    Training picks on noisy logits so unchosen experts still get tried, and so get gradient."""
+    pick = logits + torch.randn_like(logits) if noise else logits
+    w = torch.zeros_like(logits).scatter(-1, pick.topk(k, -1).indices, 1.0)
+    return k * w * torch.softmax(logits.masked_fill(w == 0, float("-inf")), -1)
+
+
 class ConditionedMixer(nn.Module):
-    """g = g0 + head(encoder(features)); the head's last layer starts at zero, so training begins at plain LoRA."""
+    """How the encoder's read sets the mix; the head's last layer starts at zero, so training begins at plain LoRA.
+
+    mix: g = g0 + head(z). gain: g = g0 * (1 + head(z)), one scalar per layer, so z sets how strongly each layer
+    is edited but not with which experts. topk: top_k experts from logits g0 + head(z) (sparse_topk)."""
+
+    MODES = ("mix", "gain", "topk")
 
     def __init__(self, shape: tuple[int, int], encoder: nn.Module, enc_dim: int, store: FeatureStore,
-                 key: Callable, hidden: int = 64, freeze_encoder: bool = False):
+                 key: Callable, hidden: int = 64, freeze_encoder: bool = False, mode: str = "mix", top_k: int = 2):
         super().__init__()
+        if mode not in self.MODES:
+            raise ValueError(f"unknown mode {mode!r}")
         self.shape, self.store, self.key, self.freeze_encoder = shape, store, key, freeze_encoder
-        self.g0 = nn.Parameter(torch.ones(shape))
+        self.mode, self.top_k = mode, top_k
+        self.g0 = nn.Parameter(torch.zeros(shape) if mode == "topk" else torch.ones(shape))
         self.encoder = encoder.requires_grad_(not freeze_encoder)
-        self.head = nn.Sequential(nn.Linear(enc_dim, hidden), nn.GELU(), nn.Linear(hidden, shape[0] * shape[1]))
+        out = shape[0] if mode == "gain" else shape[0] * shape[1]
+        self.head = nn.Sequential(nn.Linear(enc_dim, hidden), nn.GELU(), nn.Linear(hidden, out))
         nn.init.zeros_(self.head[-1].weight)
         nn.init.zeros_(self.head[-1].bias)
 
@@ -100,7 +118,11 @@ class ConditionedMixer(nn.Module):
 
     def forward(self, items: list) -> torch.Tensor:
         x = self.store([self.key(it) for it in items], self.g0.device)
-        return self.g0 + self.head(self.encoder(x)).view(-1, *self.shape)
+        h = self.head(self.encoder(x))
+        if self.mode == "gain":
+            return self.g0 * (1 + h.view(-1, self.shape[0], 1))
+        g = self.g0 + h.view(-1, *self.shape)
+        return sparse_topk(g, self.top_k, self.training) if self.mode == "topk" else g
 
     def param_groups(self, lr: float, encoder_lr: float) -> list[dict]:
         own = [p for n, p in self.named_parameters() if not n.startswith("encoder.")]
@@ -144,8 +166,12 @@ class Standardize(nn.Module):
 
 
 def trace_features(adapter: ModelAdapter, inputs: list[ObsInput], layers: list[int],
-                   batch_size: int = 64) -> np.ndarray:
-    """raw/all observer features [N, layers * positions * d], laid out as in phase 1."""
+                   batch_size: int = 64, conflict: bool = False) -> np.ndarray:
+    """raw/all observer features [N, layers * positions * d], laid out as in phase 1, then conflict features
+    (hypermodel.conflict) if asked."""
+    from hypermodel.conflict import conflict_features
+
     operands = [None if o.a_char is None else (o.a_char, o.b_char) for o in inputs]
-    resid, _ = capture(adapter, [o.text for o in inputs], operands, layers, batch_size)
-    return resid.reshape(len(inputs), -1)
+    resid, last_all = capture(adapter, [o.text for o in inputs], operands, layers, batch_size)
+    X = resid.reshape(len(inputs), -1)
+    return np.concatenate([X, conflict_features(adapter, last_all).astype(X.dtype)], 1) if conflict else X

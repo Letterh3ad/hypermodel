@@ -16,8 +16,8 @@ few-shot, greedy, exact match). The base model gets **33.5%** of held-out questi
 |---|---|---|
 | 1. Traces | Record residual-stream states at the operand and final tokens (layers 9, 14, 19). | done |
 | 2. Observer | Can a learned code `z` (64 dims) read from those states predict whether the answer will be right? | done |
-| 3. Transient editor | Does conditioning a per-question weight edit on `z` beat edits that do not look at the model's internals? | in progress |
-| 4. Persistent editor | Accumulate edits over a task stream, accepted only if a fixed evaluator approves. | planned |
+| 3. Transient editor | Does conditioning a per-question weight edit on `z` beat edits that do not look at the model's internals? | done: **no** (tie) |
+| 4. Persistent editor | Accumulate edits over a task stream, accepted only if a fixed evaluator approves. | next |
 | 5-6. Self-tuning, self-editing | The hypermodel sets its own hyperparameters, then edits its own weights, through the same gate. | planned |
 | 7. Scale up | Repeat on a larger model. | planned |
 
@@ -42,30 +42,63 @@ so the edit cannot quietly break everything else. The variants differ only in wh
 | `z-frozen` | `z` from the step 2 observer, observer frozen | does the pretrained read help as is? |
 | `z-finetune` | `z`, observer fine-tuned end to end | the main hypothesis |
 | `z-shuffled` | `z-finetune` with each input given another input's trace | is it `z`'s information, or just extra trainable capacity? |
+| `z-gain` | `z` sets one strength per layer instead of the expert mix | does `z` help if it only says *how much* to edit? |
+| `z-gain-shuffled` | `z-gain` with shuffled traces | the same capacity control for `z-gain` |
 | `router` | the current hidden state at each token (mixture-of-LoRA-experts style) | the standard per-token routing recipe |
 
 **Pass bar** (fixed before the results): on 4000 held-out questions over 3 seeds, the `z` editor beats base
 accuracy, keeps retain KL at or below 0.05 nats/token on every retain source, and beats both `none` and
 `features` with a paired-bootstrap 95% CI that excludes zero. Failing the last part is a valid result.
 
-### Results so far (seed 0 only, provisional)
+### Results
 
-| Variant | Test accuracy | vs plain LoRA (95% CI, pts) | Worst retain KL |
-|---|---|---|---|
-| base model | 0.335 | | |
-| `none` (plain LoRA) | 0.468 | | 0.0021 |
-| `z-finetune` | 0.467 | -0.05 [-1.1, +1.0] | 0.0002 |
-| `z-frozen` | 0.461 | -0.7 [-1.8, +0.5] | 0.0015 |
-| `features`* | 0.424 | -4.4 [-5.6, -3.2] | 0.0023 |
+4000 held-out questions. Differences are paired by question (the same questions, answered by both runs), with
+95% bootstrap CIs. `none` and `z-finetune` ran 3 seeds; the rest are seed 0.
 
-\* Stopped early at 2250 steps; the others ran to 5000 (`z-finetune` to 3000).
+| Variant | Test accuracy | vs plain LoRA (pts, 95% CI) | Worst retain KL | Trainable params |
+|---|---|---|---|---|
+| base model | 0.335 | | | |
+| `none` (plain LoRA) | 0.468 / 0.475 / 0.465 | | 0.0020 | 1.05M |
+| `z-finetune` | 0.457 / 0.471 / 0.465 | -0.47 [-1.18, +0.18] pooled | 0.0003 | 3.43M |
+| `z-frozen` | 0.461 | -0.65 [-1.82, +0.53] | 0.0015 | 1.05M |
+| `z-gain` | 0.463 | -0.50 [-1.62, +0.62] | 0.0002 | 3.43M |
+| `z-shuffled` | 0.458 | -1.00 [-2.17, +0.10] | 0.0002 | 3.43M |
+| `z-gain-shuffled` | 0.474 | +0.62 [-0.47, +1.75] | 0.00004 | 3.43M |
+| `router` | 0.446 | -2.17 [-3.33, -1.00] | 0.0099 | 1.15M |
+| `features`* | 0.424 | -4.38 [-5.58, -3.20] | 0.0023 | 1.06M |
 
-![Step 3, seed 0: validation accuracy during training, and final test accuracy with worst retain KL per variant](assets/step3-seed0.png)
+\* `features` and `router` stopped at 3000 steps; the others ran to 5000.
 
-So far nothing beats plain LoRA on accuracy. `z-finetune` ties it while answering 12% of questions
-differently and keeping about 10x less drift on unrelated inputs, but it also has 3.4x the trainable
-parameters, which is what `z-shuffled` tests. The first `router` run did not learn (fixed since, rerun pending).
-Seeds 1 and 2 and the shuffled control are next.
+![Step 3: accuracy difference from plain LoRA with 95% CIs, and worst retain KL, per variant](assets/step3-results.png)
+
+**Verdict: no.** Every editor lifts accuracy by about 13 points over the base model, but no variant that reads
+`z` beats plain LoRA, so step 3 fails its pass bar. The controls say why:
+
+- **`z`'s content is unused.** Swapping each question's trace for another question's changes nothing:
+  `z-finetune` vs `z-shuffled` is -0.05 [-1.20, +1.10]. In gain mode the real `z` is slightly *worse* than a
+  shuffled one (-1.12 [-2.10, -0.12], one seed, one of several comparisons, so weak evidence).
+- **The conditioning is not collapsed.** The expert mix really does vary from question to question (spread
+  0.6 to 1.6, against a pre-registered collapse threshold of 0.1; 6 to 8 effective experts out of 8). The editor
+  changes its edit per question, but those changes do not track what the model gets wrong.
+- **The lower side effects come from the architecture, not from `z`.** The `z`-conditioned editors drift about
+  10x less on unrelated inputs, but so do the shuffled controls.
+- A second observer input (logit-lens conflict signals between layers) did not predict correctness better than
+  `z` alone, so its editor run was skipped by a pre-registered rule.
+
+This is a negative result for the specific claim "an observer's read of the hidden state makes a better
+per-question weight edit than plain fine-tuning", at this model size and on this task. Under greedy decoding,
+correctness here is almost a function of the question (step 2), which leaves `z` little to add.
+
+### What next
+
+Step 4 changes the question from "edit better per question" to "accumulate edits over time": a generator
+writes one new rank-8 expert per episode from the observer's view of recent failures, over a stream of
+arithmetic tasks, and a fixed evaluator decides which experts stay. The full system has to beat naive
+sequential LoRA on final stream accuracy (paired CI excluding zero, 3 seeds).
+
+Because step 3 tied, step 4 starts with a cheap pilot fixed in advance: on one task, does a generated expert
+beat a randomly started one given the same refinement budget? If yes, build the rest. If not, the hypernetwork
+line stops here.
 
 ## Running it
 
@@ -84,6 +117,8 @@ them. One 8 GB GPU is enough for everything above. Set `CUDA_VISIBLE_DEVICES=-1`
 
 `src/hypermodel/`: `arithmetic` (task and difficulty dial), `adapter` (model-agnostic hooks), `scoring`,
 `trace`, `probe` / `contrastive` / `sae` / `observer` (step 2), `editor` (LoRA bank), `condition` (mixers),
-`retain` (retain set and KL), `edit_train` (step 3 train/eval CLI), `watch`.
+`retain` (retain set and KL), `edit_train` (step 3 train/eval CLI), `conflict` (logit-lens conflict signals),
+`mix_usage` (how much a conditioned mix varies), `compare` (paired-bootstrap run comparison), `decide`
+(pre-registered queue rules), `watch`.
 
 Design decisions and their alternatives are logged in [`DECISIONS.md`](DECISIONS.md).
