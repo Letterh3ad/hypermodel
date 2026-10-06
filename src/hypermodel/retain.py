@@ -45,12 +45,13 @@ def _paragraphs(split: str) -> list[str]:
     return [_clip(r) for r in rows]
 
 
-def retain_items(split: str, n_text: int, n_arith: int, seed: int = 0) -> list[RetainItem]:
-    """n_text generic paragraphs plus n_arith questions per ARITHMETIC setting; train and test never overlap."""
+def retain_items(split: str, n_text: int, n_arith: int, seed: int = 0,
+                 arithmetic: tuple[str, ...] = ARITHMETIC) -> list[RetainItem]:
+    """n_text generic paragraphs plus n_arith questions per arithmetic setting; train and test never overlap."""
     rng = random.Random(f"retain-{split}-{seed}")
     paras = _paragraphs(split)
     items = [RetainItem(t, 0, "text") for t in rng.sample(paras, min(n_text, len(paras)))]
-    for name in ARITHMETIC:
+    for name in arithmetic:
         d = Difficulty.parse(name)
         prefix = few_shot_prefix(d)
         # One fixed pool for every seed and n, so splits never overlap: train takes the head, test the tail.

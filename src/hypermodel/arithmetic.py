@@ -91,6 +91,6 @@ def few_shot_prefix(d: Difficulty) -> str:
     return "".join(f"{q.prompt}{q.answer}\n" for q in _exemplars(d))
 
 
-def generate(d: Difficulty, n: int, seed: int) -> list[Question]:
-    """Up to n unique questions, never one of the few-shot exemplars."""
-    return _sample(d, n, random.Random(f"{seed}-{d.name}"), set(_exemplars(d)))
+def generate(d: Difficulty, n: int, seed: int, exclude: frozenset[Question] = frozenset()) -> list[Question]:
+    """Up to n unique questions, never one of the few-shot exemplars or of exclude."""
+    return _sample(d, n, random.Random(f"{seed}-{d.name}"), set(_exemplars(d)) | exclude)
