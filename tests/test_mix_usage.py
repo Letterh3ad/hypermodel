@@ -47,3 +47,34 @@ def test_a_saved_conditioned_run_is_rebuilt_without_the_lm(tmp_path, monkeypatch
     torch.save({"bank": bank.state_dict(), "mixer": mixer.state_dict()}, run / "editor-s0.pt")
     want = mixer.eval()(qs["test"])
     assert torch.allclose(mixing_on_test(run, ts), want, atol=1e-4)
+
+
+@pytest.mark.slow
+def test_a_features_run_is_rebuilt_on_its_training_schema(tmp_path, monkeypatch):
+    # The schema (ops, digit widths) comes from train + retain items, so test questions alone give fewer columns.
+    from hypermodel.adapter import load
+    from hypermodel.arithmetic import Difficulty, few_shot_prefix, generate
+    import hypermodel.retain as retain
+    from hypermodel.edit_train import build_mixer, retain_for, split_questions
+    from hypermodel.editor import LoRABank
+    from hypermodel.mix_usage import mixing_on_test
+    from hypermodel.trace import TraceSet, record
+
+    monkeypatch.setattr(retain, "_load_wikitext", lambda split: (_ for _ in ()).throw(ConnectionError()))
+    lm = load("EleutherAI/pythia-14m", device="cpu")
+    d = Difficulty("mul", 2, digits_b=3)
+    prefix = few_shot_prefix(d)
+    ts = TraceSet.load(record(lm, generate(d, 40, seed=0), prefix, [1, 3], tmp_path / "t", batch_size=20))
+    qs = split_questions(ts.records, ts.split)
+    r_train, r_test = retain_for(0, 4, 3)
+    bank = LoRABank(lm, [2, 4], n_experts=2, rank=4)
+    mixer = build_mixer("features", bank, lm, ts, r_train + r_test, qs["train"] + r_train, prefix)
+    with torch.no_grad():
+        mixer.head[-1].weight.normal_()
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "result.json").write_text(json.dumps({"conditioning": "features", "seed": 0, "retain_text": 4,
+                                                 "retain_arith": 3}))
+    torch.save({"bank": bank.state_dict(), "mixer": mixer.state_dict()}, run / "editor-s0.pt")
+    want = mixer.eval()(qs["test"])
+    assert torch.allclose(mixing_on_test(run, ts), want, atol=1e-4)

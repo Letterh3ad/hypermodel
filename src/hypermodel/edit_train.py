@@ -149,6 +149,17 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     return history
 
 
+def feature_table(ts, retain: list[RetainItem], prefix: str) -> tuple[list[str], np.ndarray]:
+    """Question-only features over every task question and retain item; the schema (ops, digit widths) depends on
+    this whole set, so a saved features run is only rebuilt from the same one."""
+    from hypermodel.condition import question_features
+    return question_features([Question(r["a"], r["b"], r["op"], r["answer"]) for r in ts.records] + retain, prefix)
+
+
+def retain_for(seed: int, n_text: int, n_arith: int) -> tuple[list[RetainItem], list[RetainItem]]:
+    return retain_items("train", n_text, n_arith, seed), retain_items("test", *RETAIN_TEST)
+
+
 CONDITIONING = ("none", "features", "z-frozen", "z-finetune", "z-shuffled", "z-gain", "z-gain-shuffled", "z-sparse",
                 "router")
 
@@ -163,8 +174,7 @@ def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: li
 
     conflict: per-task-row conflict features (hypermodel.conflict), appended to the observer input; retain items
     get theirs traced now. Conditioning inputs for every task question and retain item are computed once up front."""
-    from hypermodel.condition import (ConditionedMixer, FeatureStore, RouterMixer, Standardize, obs_input,
-                                      question_features, trace_features)
+    from hypermodel.condition import ConditionedMixer, FeatureStore, RouterMixer, Standardize, obs_input, trace_features
     if kind not in CONDITIONING:
         raise ValueError(f"unknown conditioning {kind!r}")
     if kind == "none":
@@ -172,9 +182,8 @@ def build_mixer(kind: str, bank: LoRABank, adapter: ModelAdapter, ts, retain: li
     if kind == "router":
         return RouterMixer(bank.shape, bank.d_in).to(adapter.device)
     key = lambda it: obs_input(it, prefix).text  # noqa: E731
-    questions = [Question(r["a"], r["b"], r["op"], r["answer"]) for r in ts.records]
     if kind == "features":
-        keys, X = question_features(questions + retain, prefix)
+        keys, X = feature_table(ts, retain, prefix)
         X = torch.as_tensor(X)
         fit = X[[keys.index(key(it)) for it in fit_items]]
         sd = fit.std(0)
@@ -247,8 +256,7 @@ def main():
     torch.manual_seed(args.seed)
     adapter = load(ts.meta["model"], args.device)
     bank = LoRABank(adapter, args.layers, args.experts, args.rank, args.alpha)
-    retain_train = retain_items("train", args.retain_text, args.retain_arith, args.seed)
-    retain_test = retain_items("test", *RETAIN_TEST)
+    retain_train, retain_test = retain_for(args.seed, args.retain_text, args.retain_arith)
     observer = args.observer or Path(f"runs/observer-20k/raw/observer-s{args.seed}.pt")
     mixer = build_mixer(args.conditioning, bank, adapter, ts, retain_train + retain_test,
                         qs["train"] + retain_train, prefix, observer, args.top_k,

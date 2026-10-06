@@ -27,8 +27,8 @@ def mixing_stats(g: torch.Tensor) -> dict[str, float]:
 def mixing_on_test(run: Path, ts) -> torch.Tensor | None:
     """g for the run's test questions, rebuilt from its checkpoint without loading the LM; None for plain
     LoRA and the per-token router."""
-    from hypermodel.condition import ConditionedMixer, FeatureStore, Standardize, question_features
-    from hypermodel.edit_train import split_questions
+    from hypermodel.condition import ConditionedMixer, FeatureStore, Standardize
+    from hypermodel.edit_train import feature_table, retain_for, split_questions
     from hypermodel.observer import Observer
 
     result = json.loads((run / "result.json").read_text())
@@ -40,8 +40,10 @@ def mixing_on_test(run: Path, ts) -> torch.Tensor | None:
     test = split_questions(ts.records, ts.split)["test"]
     keys = [prefix + q.prompt for q in test]
     if kind == "features":
-        _, X = question_features(test, prefix)
-        encoder, store = Standardize(state["encoder.mu"], state["encoder.sd"]), FeatureStore(keys, torch.as_tensor(X))
+        retain_train, retain_test = retain_for(result["seed"], result["retain_text"], result["retain_arith"])
+        all_keys, X = feature_table(ts, retain_train + retain_test, prefix)
+        encoder = Standardize(state["encoder.mu"], state["encoder.sd"])
+        store = FeatureStore(all_keys, torch.as_tensor(X))
     else:
         rows = np.flatnonzero(ts.mask("test"))
         X = np.asarray(ts.resid[rows], np.float32).reshape(len(rows), -1)
