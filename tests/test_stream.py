@@ -112,3 +112,8 @@ def test_naive_baseline_trains_through_the_stream_and_reports_forgetting(monkeyp
     assert res["forgetting"][1] is None and res["retain_kl"]["worst"] >= 0
     assert sum("episode" in r for r in rows) == 2 * EPISODES
     assert all(torch.equal(v, lm.model.state_dict()[k]) for k, v in base.items())  # the base model never moves
+
+
+def test_excluding_another_tasks_questions_leaves_a_small_task_whole():
+    seen = frozenset(generate(Difficulty.parse("mul-2x3"), 2000, 0))
+    assert task_data("mod-2", exclude=seen) == task_data("mod-2")

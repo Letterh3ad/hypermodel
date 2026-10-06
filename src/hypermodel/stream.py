@@ -42,6 +42,8 @@ def task_data(name: str, exclude: frozenset[Question] = frozenset()) -> TaskData
     cuts, i = {}, 0
     for k in ("gate", "test", "val"):
         cuts[k], i = tuple(pool[i:i + sizes[k]]), i + sizes[k]
+    if not all(cuts.values()) or i >= len(pool):
+        raise ValueError(f"{name}: only {len(pool)} questions left after exclusions")
     return TaskData(name, few_shot_prefix(d), train=tuple(pool[i:]), **cuts)
 
 

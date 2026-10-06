@@ -69,6 +69,7 @@ def _question(d: Difficulty, a: int, b: int) -> Question:
 
 def _sample(d: Difficulty, n: int, rng: random.Random, exclude: set[Question]) -> list[Question]:
     ra, rb = _pairs(d)
+    exclude = {q for q in exclude if q.op == d.op and q.a in ra and q.b in rb}  # only these shrink the space
     space = len(ra) * len(rb) - len(exclude)
     n = min(n, space)
     if n > space // 2:  # dense: enumerate, shuffle
