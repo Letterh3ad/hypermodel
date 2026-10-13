@@ -51,22 +51,26 @@ class LoRABank(nn.Module):
     def d_in(self) -> int:
         return self.V.shape[2]
 
-    def delta(self, l: int, h: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+    def delta(self, l: int, h: torch.Tensor, g: torch.Tensor,
+              weights: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         """Edit added to writer l's output; g is [E], [B, E] or [B, T, E], h is [B, T, d_in]."""
-        low = torch.einsum("btd,edr->bter", h, self.V[l].to(h.dtype))
+        U, V = weights or (self.U, self.V)
+        low = torch.einsum("btd,edr->bter", h, V[l].to(h.dtype))
         g = g.to(h.dtype)
         g = (g if g.dim() == 3 else g.unsqueeze(-2)).expand(*h.shape[:2], -1)
-        return self.scale * torch.einsum("bter,bte,eor->bto", low, g, self.U[l].to(h.dtype))
+        return self.scale * torch.einsum("bter,bte,eor->bto", low, g, U[l].to(h.dtype))
 
     @contextmanager
-    def apply(self, mixing: Mixing):
+    def apply(self, mixing: Mixing, weights: tuple[torch.Tensor, torch.Tensor] | None = None):
         """Hooks the writers for the duration.
 
         mixing is g [L, E] (shared), g [B, L, E] (per example), or a router called in each hook as
-        router(l, h) -> [B, T, E] (per token, from the writer's own input h)."""
+        router(l, h) -> [B, T, E] (per token, from the writer's own input h). weights: (U, V) used in place of the
+        bank's own, e.g. a generator's output, so gradient reaches whatever made them."""
+        shape = self.shape if weights is None else weights[1].shape[:2]
         if isinstance(mixing, torch.Tensor):
-            if mixing.shape[-2:] != self.shape:
-                raise ValueError(f"mixing shape {tuple(mixing.shape)} does not end in {self.shape}")
+            if mixing.shape[-2:] != shape:
+                raise ValueError(f"mixing shape {tuple(mixing.shape)} does not end in {shape}")
             g = mixing
             mixing = lambda l, h: g[..., l, :]  # noqa: E731
 
@@ -74,7 +78,7 @@ class LoRABank(nn.Module):
 
         def hook(l):
             def fn(_m, inp, out):
-                d = self.delta(l, inp[0], mixing(l, inp[0]))
+                d = self.delta(l, inp[0], mixing(l, inp[0]), weights)
                 log.add(d)
                 return out + d
             return fn
@@ -85,3 +89,17 @@ class LoRABank(nn.Module):
         finally:
             for h in handles:
                 h.remove()
+
+
+class ExpertView:
+    """Duck-types a LoRABank whose U, V are given tensors (e.g. generated, with gradient); host supplies the hooks."""
+
+    def __init__(self, host: LoRABank, U: torch.Tensor, V: torch.Tensor):
+        self.host, self.U, self.V = host, U, V
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.V.shape[0], self.V.shape[1]
+
+    def apply(self, mixing: Mixing):
+        return self.host.apply(mixing, weights=(self.U, self.V))

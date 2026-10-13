@@ -42,8 +42,13 @@ def answer_loss(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, prefix:
                 questions: list[Question]) -> tuple[torch.Tensor, torch.Tensor]:
     """Answer cross-entropy and the edit norm on the same pass."""
     batch = answer_batch(adapter.tokenizer, prefix, questions, adapter.device)
+    labels = batch.pop("labels")
+    # Left padding puts every answer in the last k columns; full-vocab logits over the long few-shot prefix ran out of
+    # memory, so only the k + 1 positions that predict answer tokens are computed.
+    k = labels.shape[1] - int((labels != -100).float().argmax(1).min())
     with bank.apply(mixer(questions)) as edits:
-        loss = adapter.model(**batch).loss
+        logits = adapter.model(**batch, logits_to_keep=k + 1).logits[:, :-1]
+    loss = nn.functional.cross_entropy(logits.float().flatten(0, 1), labels[:, -k:].flatten(), ignore_index=-100)
     return loss, edits.norm()
 
 

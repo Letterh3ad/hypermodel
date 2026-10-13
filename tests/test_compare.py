@@ -33,3 +33,11 @@ def test_runs_are_paired_by_prompt_not_by_file_order(tmp_path):
             "".join(json.dumps({"prompt": p, "correct": c}) + "\n" for p, c in rows))
     a, b = load_correct(tmp_path / "a", tmp_path / "b")
     assert a.tolist() == [True, False] and b.tolist() == [True, True]
+
+
+def test_record_files_pair_by_prompt(tmp_path):
+    from hypermodel.compare import paired_records
+    for name, rows in {"a.jsonl": [("1*2=", True), ("3*4=", False)], "b.jsonl": [("3*4=", True), ("1*2=", False)]}.items():
+        (tmp_path / name).write_text("".join(json.dumps({"prompt": p, "correct": c}) + "\n" for p, c in rows))
+    a, b = paired_records(tmp_path / "a.jsonl", tmp_path / "b.jsonl")
+    assert a.tolist() == [True, False] and b.tolist() == [False, True]

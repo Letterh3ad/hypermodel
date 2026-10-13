@@ -268,3 +268,14 @@ def test_episode_gate_rejects_non_finite_scores():
 def test_dtype_check_needs_a_positive_count(n):
     with pytest.raises(SystemExit):
         stream.parser().parse_args(["--dtype-check", n])
+
+
+def test_evaluator_records_are_per_gate_question_and_accuracy_agrees(monkeypatch):
+    import hypermodel.edit_train as et
+    td, gate = task_data("mod-2")
+    ev = Evaluator([td], {td.name: gate})
+    monkeypatch.setattr(et, "evaluate", lambda a, b, m, qs, p: [{"prompt": q.prompt, "correct": q.a % 2 == 0}
+                                                                  for q in qs])
+    recs = ev.records(None, None, None, "mod-2")
+    assert [r["prompt"] for r in recs] == [q.prompt for q in gate]
+    assert ev.accuracy(None, None, None)["mod-2"] == pytest.approx(sum(r["correct"] for r in recs) / len(recs))

@@ -192,3 +192,29 @@ def test_an_observer_with_conflict_features_drives_the_editor(small_lm, tmp_path
     np.testing.assert_allclose(mixer.store.features[:20, -C.shape[1]:].numpy(), C, rtol=1e-2, atol=1e-2)
     train(small_lm, bank, mixer, qs["train"], qs["val"], prefix, max_steps=2, batch_size=4, eval_every=2,
           retain=r_train)
+
+
+@pytest.mark.slow
+def test_answer_loss_only_computes_answer_logits_yet_matches_the_full_loss(small_lm):
+    from hypermodel.edit_train import answer_loss
+
+    torch.manual_seed(0)
+    prefix = few_shot_prefix(Difficulty("add", 2))
+    qs = generate(Difficulty("add", 2), 3, seed=0) + generate(Difficulty("mul", 3, 3), 3, seed=0)
+    bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
+    with torch.no_grad():
+        for p in bank.parameters():
+            p.normal_(0, 0.1)
+    mixer = ConstantMixer(bank.shape)
+    batch = answer_batch(small_lm.tokenizer, prefix, qs, "cpu")
+    with torch.no_grad(), bank.apply(mixer(qs)):
+        full = small_lm.model(**batch).loss
+    seen = []
+    hook = small_lm.model.register_forward_hook(lambda m, a, kw, out: seen.append(out.logits.shape[1]),
+                                                with_kwargs=True)
+    try:
+        loss, _ = answer_loss(small_lm, bank, mixer, prefix, qs)
+    finally:
+        hook.remove()
+    assert torch.allclose(loss, full, atol=1e-5)
+    assert seen[-1] < batch["input_ids"].shape[1]

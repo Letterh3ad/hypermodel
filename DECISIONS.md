@@ -175,3 +175,26 @@ retain KL .16-.28 (fails J). Forgetting is real; the penalties are what contain 
 **Decision:** Step 4 is compared against the penalised naive baseline (the stronger, J-passing one). The free control
 stays as evidence the stream forgets. Gate inputs must be finite (NaN raises).
 **Alternatives:** Compare against the free control only (an easy win that J itself would reject).
+
+## 2026-10-13 - Generator G_psi and pilot design (ticket 02)
+**Context:** The spec fixes the generator's inputs and output (one rank-8 expert on 4 down_proj layers) but not its
+architecture, meta-training loop or which observer feeds it. `runs/observer-mul-2x3` reads 36 contrastive dims whose
+bases were never saved.
+**Decision:** Frozen observer `runs/observer-20k/raw` (step 3's). Context = mean z, z std and failure fraction over the
+episode's base-model failures. Bank encoding: per expert, a fixed-probe sketch P_out^T U V^T P_in (8x8 per layer,
+blind to rotations inside the rank) divided by its Frobenius norm, plus log norms and strength, through an MLP and
+mean-pooled (Deep Sets); empty bank = a learned token. Factorised head: U[l] = 0.03 * B_U[l] @ C_U[l], B learned
+[d, 64], C [64, 8] from the context; the C_U head starts at zero, so an untrained generator is a zero delta like a
+fresh LoRA expert. ~4.1M params. Generated (U, V) reach the frozen model through `LoRABank.apply(g, weights=...)` /
+`ExpertView`, so answer_loss, evaluate and retain_kl are reused unchanged. Meta-training: 2 episodes per step from
+different settings, chunk 200-2000, loss on 16 held-out questions + retain KL (beta 1) + norm (gamma 0.1), half the
+episodes with 1-8 earlier generated experts applied at random strengths. Base correctness and z are cached per pool.
+Pilot arms share seed, data order and refine (`edit_train.train`, 50 steps); gate records per question per arm.
+**Alternatives:** observer-mul-2x3 (unfeedable); raw U, V hypernetwork output (131k outputs, unstable per step 3);
+bank encoding on raw U, V entries (not rotation invariant); fine-tuning the observer during meta-training (more
+moving parts for a pilot); recomputing failures with the bank applied (a generation pass per episode).
+
+## 2026-10-13 - Meta-training settings add-8, mul-2, mod-3, mod-5x1 (not add-3, mul-1x3)
+**Context:** Base accuracy add-3 .97 and mul-1x3 .97 leave almost no failing questions for the generator to read.
+**Decision:** Swap them for add-8 (.62) and mod-5x1 (.30), measured before any meta-training. Disjoint by operand width.
+**Alternatives:** keep the spec's proposal (mod-3 alone would carry the meta signal); mul-1x5 (.86, still high).

@@ -126,3 +126,18 @@ def test_router_mixes_per_token_and_trains_only_bank_and_router(tiny_model):
     for p in (mixer.g0, mixer.W, mixer.c, bank.U, bank.V):
         assert p.grad is not None and p.grad.abs().sum() > 0
     assert all(p.grad is None for p in tiny_model.parameters())
+
+
+def test_weights_override_the_banks_own_and_carry_gradient(tiny_model):
+    bank = _randomised(tiny_model)
+    other = _randomised(tiny_model)
+    ids = torch.randint(0, 64, (2, 5))
+    g = torch.ones(len(LAYERS), 3)
+    with other.apply(g):
+        want = _logits(tiny_model, ids)
+    U, V = other.U.detach().clone().requires_grad_(), other.V.detach().clone().requires_grad_()
+    with bank.apply(g, weights=(U, V)):
+        got = tiny_model(ids).logits
+    assert torch.allclose(got, want, atol=1e-6)
+    got.pow(2).mean().backward()
+    assert U.grad.abs().sum() > 0 and bank.U.grad is None
