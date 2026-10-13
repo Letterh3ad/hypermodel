@@ -218,3 +218,55 @@ def test_answer_loss_only_computes_answer_logits_yet_matches_the_full_loss(small
         hook.remove()
     assert torch.allclose(loss, full, atol=1e-5)
     assert seen[-1] < batch["input_ids"].shape[1]
+
+
+@pytest.mark.slow
+def test_a_prefix_map_gives_each_question_its_own_prefix(small_lm):
+    tok = small_lm.tokenizer
+    qs = generate(Difficulty("add", 2), 2, 0) + generate(Difficulty("mul", 3), 2, 0)
+    prefix = {q: ("1+2=3\n" if q.op == "+" else "2*3=6\n10*10=100\n") for q in qs}
+    batch = answer_batch(tok, prefix, qs, "cpu")
+    for ids, mask, labels, q in zip(batch["input_ids"], batch["attention_mask"], batch["labels"], qs):
+        assert tok.decode(ids[mask.bool()]) == prefix[q] + q.prompt + f"{q.answer}\n"
+        assert tok.decode(labels[labels != -100]) == f"{q.answer}\n"
+
+
+class _Bank(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.zeros(1))
+
+    def apply(self, g):
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def test_evaluate_scores_each_question_under_its_own_prefix(monkeypatch):
+    import hypermodel.edit_train as et
+    monkeypatch.setattr(et, "score", lambda a, qs, p, bs=64: [{"prompt": q.prompt, "prefix": p} for q in qs])
+    qs = generate(Difficulty("add", 2), 5, 0) + generate(Difficulty("mul", 3), 5, 0)
+    prefix = {q: q.op for q in qs}
+    recs = evaluate(None, _Bank(), ConstantMixer((1, 1)), qs, prefix)
+    assert sorted((r["prompt"], r["prefix"]) for r in recs) == sorted((q.prompt, q.op) for q in qs)
+
+
+def test_replay_fills_its_share_of_every_batch(monkeypatch):
+    import hypermodel.edit_train as et
+    seen = []
+
+    def loss(adapter, bank, mixer, prefix, batch):
+        seen.append(batch)
+        return bank.w.sum() + 1, torch.zeros(())
+    monkeypatch.setattr(et, "answer_loss", loss)
+    monkeypatch.setattr(et, "evaluate", lambda *a, **k: [{"correct": True}])
+    current, old = generate(Difficulty("add", 2), 48, 0), generate(Difficulty("mul", 3), 20, 0)
+    adapter = type("A", (), {"model": torch.nn.Linear(1, 1)})()
+    train(adapter, _Bank(), ConstantMixer((1, 1)), current, current[:2], "", max_steps=6, batch_size=16,
+          eval_every=6, replay=old, replay_per_batch=4, log=lambda h: None)
+    assert len(seen) == 6
+    for b in seen:
+        assert len(b) == 16 and sum(q in old for q in b) == 4 and sum(q in current for q in b) == 12
+    seen.clear()
+    train(adapter, _Bank(), ConstantMixer((1, 1)), current, current[:2], "", max_steps=3, batch_size=16,
+          eval_every=3, replay=[], replay_per_batch=4, log=lambda h: None)
+    assert all(len(b) == 16 and set(b) <= set(current) for b in seen)

@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 
 
-def paired_records(a: Path, b: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Correctness from two records files (jsonl with prompt and correct), aligned by prompt."""
+def paired_records(a: Path, b: Path, keep=lambda r: True) -> tuple[np.ndarray, np.ndarray]:
+    """Correctness from two records files (jsonl with prompt and correct), aligned by prompt; keep filters rows."""
     def rows(path):
-        return {r["prompt"]: r["correct"] for r in map(json.loads, path.open())}
+        return {r["prompt"]: r["correct"] for r in map(json.loads, path.open()) if keep(r)}
     A, B = rows(a), rows(b)
     if set(A) != set(B):
         raise ValueError(f"{a} and {b} were scored on different questions")
@@ -25,11 +25,18 @@ def load_correct(a: Path, b: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def paired_bootstrap(pairs: list[tuple[np.ndarray, np.ndarray]], n_boot: int = 5000, seed: int = 0) -> dict:
     """Mean of a - b over questions, pooled over pairs (seeds); questions are resampled jointly across pairs."""
-    D = np.stack([a.astype(float) - b for a, b in pairs])
+    return stratified_bootstrap([pairs], n_boot, seed)
+
+
+def stratified_bootstrap(strata: list[list[tuple[np.ndarray, np.ndarray]]], n_boot: int = 5000, seed: int = 0) -> dict:
+    """Mean over strata (tasks) of each stratum's paired_bootstrap mean, so every task weighs the same whatever its
+    size; questions are resampled within their stratum, jointly across its pairs (seeds)."""
+    Ds = [np.stack([a.astype(float) - b for a, b in pairs]) for pairs in strata]
     rng = np.random.default_rng(seed)
-    boots = [D[:, rng.integers(0, D.shape[1], D.shape[1])].mean() for _ in range(n_boot)]
+    boots = [np.mean([D[:, rng.integers(0, D.shape[1], D.shape[1])].mean() for D in Ds]) for _ in range(n_boot)]
     lo, hi = np.percentile(boots, [2.5, 97.5])
-    return {"diff": D.mean(), "lo": lo, "hi": hi, "disagree": (D != 0).mean()}
+    return {"diff": np.mean([D.mean() for D in Ds]), "lo": lo, "hi": hi,
+            "disagree": np.mean([(D != 0).mean() for D in Ds])}
 
 
 def main():

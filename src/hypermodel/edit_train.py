@@ -5,6 +5,7 @@ import copy
 import json
 import random
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,12 @@ from hypermodel.retain import RetainItem, retain_batch, retain_items, retain_kl,
 RETAIN_TEST = (400, 200)  # held-out paragraphs, and questions per arithmetic setting, for the retain KL verdict
 from hypermodel.scoring import score, tokenize_regions
 
+Prefix = str | Mapping[Question, str]  # one few-shot prefix, or each question's own when tasks share a batch
+
+
+def _prefixes(prefix: Prefix, questions: list[Question]) -> list[str]:
+    return [prefix if isinstance(prefix, str) else prefix[q] for q in questions]
+
 
 class ConstantMixer(nn.Module):
     """Unconditioned mixing: one learned g for every question, which makes the bank plain LoRA."""
@@ -31,14 +38,15 @@ class ConstantMixer(nn.Module):
         return self.g
 
 
-def answer_batch(tok, prefix: str, questions: list[Question], device) -> dict:
+def answer_batch(tok, prefix: Prefix, questions: list[Question], device) -> dict:
     """Teacher-forced prefix + prompt + answer + newline; labels only on the answer and newline."""
-    batch, answer = tokenize_regions(tok, [prefix + q.prompt + f"{q.answer}\n" for q in questions],
-                                     [len(prefix + q.prompt) for q in questions], device)
+    pre = _prefixes(prefix, questions)
+    batch, answer = tokenize_regions(tok, [p + q.prompt + f"{q.answer}\n" for p, q in zip(pre, questions)],
+                                     [len(p + q.prompt) for p, q in zip(pre, questions)], device)
     return {**batch, "labels": batch["input_ids"].masked_fill(~answer, -100)}
 
 
-def answer_loss(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, prefix: str,
+def answer_loss(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, prefix: Prefix,
                 questions: list[Question]) -> tuple[torch.Tensor, torch.Tensor]:
     """Answer cross-entropy and the edit norm on the same pass."""
     batch = answer_batch(adapter.tokenizer, prefix, questions, adapter.device)
@@ -53,8 +61,13 @@ def answer_loss(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, prefix:
 
 
 def evaluate(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, questions: list[Question],
-             prefix: str, batch_size: int = 64) -> list[dict]:
-    """Greedy exact match, each score batch edited with its own mixing."""
+             prefix: Prefix, batch_size: int = 64) -> list[dict]:
+    """Greedy exact match, each score batch edited with its own mixing. A prefix map scores per prefix group."""
+    if not isinstance(prefix, str):
+        groups: dict[str, list[Question]] = {}
+        for p, q in zip(_prefixes(prefix, questions), questions):
+            groups.setdefault(p, []).append(q)
+        return [r for p, qs in groups.items() for r in evaluate(adapter, bank, mixer, qs, p, batch_size)]
     records = []
     with torch.no_grad():
         for i in range(0, len(questions), batch_size):
@@ -100,20 +113,23 @@ def _accuracy(records: list[dict]) -> float:
 
 
 def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: list[Question],
-          val_qs: list[Question], prefix: str, max_steps: int = 2000, batch_size: int = 16,
+          val_qs: list[Question], prefix: Prefix, max_steps: int = 2000, batch_size: int = 16,
           lr: float = 1e-3, weight_decay: float = 0.0, eval_every: int = 100, patience: int = 5,
           seed: int = 0, retain: list[RetainItem] | None = None, beta: float = 1.0, gamma: float = 0.0,
-          retain_per_source: int = 3, encoder_lr: float | None = None, log=print) -> list[dict]:
+          retain_per_source: int = 3, encoder_lr: float | None = None, replay: list[Question] | None = None,
+          replay_per_batch: int = 0, log=print) -> list[dict]:
     """AdamW on the bank and mixer only, minimising answer CE + beta * retain KL + gamma * edit norm.
 
     The KL term weights retain sources equally; a fine-tuned observer trains at encoder_lr (default lr / 10).
-    Restores the state with the best val accuracy."""
+    With replay, replay_per_batch of every batch_size come from it. Restores the state with the best val accuracy."""
     adapter.model.requires_grad_(False)
     groups = (mixer.param_groups(lr, encoder_lr or lr / 10) if hasattr(mixer, "param_groups")
               else [{"params": list(mixer.parameters()), "lr": lr}])
     opt = torch.optim.AdamW([{"params": list(bank.parameters()), "lr": lr}, *groups], weight_decay=weight_decay)
     rng = random.Random(seed)
-    questions = _batches(train_qs, batch_size, rng)
+    replay_per_batch = replay_per_batch if replay else 0
+    questions = _batches(train_qs, batch_size - replay_per_batch, rng)
+    replayed = _batches(replay, replay_per_batch, rng) if replay_per_batch else None
     retain_stream = _stratified(retain, retain_per_source, rng) if retain and beta else None
     best = {"acc": -1.0, "state": None}
     history, stale = [], 0
@@ -121,7 +137,7 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     t = time.perf_counter()
     for step in range(1, max_steps + 1):
         bank.train(), mixer.train()
-        ce, norm = answer_loss(adapter, bank, mixer, prefix, next(questions))
+        ce, norm = answer_loss(adapter, bank, mixer, prefix, next(questions) + (next(replayed) if replayed else []))
         kl = torch.zeros((), device=ce.device)
         if retain_stream:
             chunk = next(retain_stream)
