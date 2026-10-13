@@ -69,6 +69,7 @@ def _question(d: Difficulty, a: int, b: int) -> Question:
 
 def _sample(d: Difficulty, n: int, rng: random.Random, exclude: set[Question]) -> list[Question]:
     ra, rb = _pairs(d)
+    exclude = {q for q in exclude if q.op == d.op and q.a in ra and q.b in rb}  # only these shrink the space
     space = len(ra) * len(rb) - len(exclude)
     n = min(n, space)
     if n > space // 2:  # dense: enumerate, shuffle
@@ -91,6 +92,6 @@ def few_shot_prefix(d: Difficulty) -> str:
     return "".join(f"{q.prompt}{q.answer}\n" for q in _exemplars(d))
 
 
-def generate(d: Difficulty, n: int, seed: int) -> list[Question]:
-    """Up to n unique questions, never one of the few-shot exemplars."""
-    return _sample(d, n, random.Random(f"{seed}-{d.name}"), set(_exemplars(d)))
+def generate(d: Difficulty, n: int, seed: int, exclude: frozenset[Question] = frozenset()) -> list[Question]:
+    """Up to n unique questions, never one of the few-shot exemplars or of exclude."""
+    return _sample(d, n, random.Random(f"{seed}-{d.name}"), set(_exemplars(d)) | exclude)

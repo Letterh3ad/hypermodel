@@ -157,3 +157,21 @@
 **Context:** All pre-registered step 3 runs are done (3 seeds of plain and z-finetune, plus z-frozen, z-shuffled, z-gain, z-gain-shuffled, router, features). No z variant beats plain LoRA; z vs shuffled z is a tie (gain mode: real z slightly worse). The conflict-observer and sparse-gating follow-ups were skipped by their pre-registered rules.
 **Decision:** Record the verdict as a tie and follow the step 4 gate table: phase 3 ticket 02 pilot (generated vs random-start expert) after the ticket 01 harness. The public README carries the full results table, CIs and figure, rather than a separate report file in the gitignored `.scratch/`.
 **Alternatives:** more seeds for z-gain (CI already spans plain; the shuffled control already beats it); a tracked `reports/` file (duplicates the README).
+
+## 2026-10-06 - Step 4 stream harness details (ticket 01)
+**Context:** The spec fixes the stream, episode size and evaluator J but not the split sizes, and mod-2 has only 716 distinct questions, so "4 x 2000 fresh questions" is impossible for it.
+**Decision:** One fixed pool per task for every seed (seed 7919), cut gate 500 / test 1000 / val 250 / rest train; tasks too small for that are cut 15 / 30 / 10 / 45 % and their episodes are reshuffles of the whole train pool. The observer's 20k mul-2x3 trace questions are excluded from every split, so the sealed gate never holds a question any trainable part saw. bf16: base mul-2x3 0.3355 vs fp32 0.3350 on 4000 questions (within the 1 pt rule; 82% identical predictions, no speed gain). Naive baseline = step 3's plain LoRA (8 experts, constant mix, retain KL beta 1, norm 0.1), one pass per episode, optimiser reset per episode, nothing gated.
+**Alternatives:** shrink EPISODE_N for mod-2 only (breaks equal episode budgets); swap mod-2 for a larger task (changes the pre-registered stream); keep fp32 (the rule says bf16, and it frees memory for the generator).
+
+## 2026-10-13 - Stream harness fixes after gate 01 round 1
+**Context:** Gate 01 round 1: mod-2 got 80 steps vs 500 (pool 324 < EPISODE_N), max-minus-final forgetting hid a 3-5 pt drop later repaired, gate sets reached trainers via `TaskData`, `judge` passed silently without KL or earlier tasks, the 107-question mod-2 gate sat below J's 1 pt rule.
+**Decision:** Every episode is EPISODE_N questions (small pools cycle reshuffled passes, deterministic per task), so every task gets EPISODE_N // batch_size steps. `task_data` returns `(TaskData, gate)`; `TaskData` has no gate field and the `Evaluator` takes gates separately. `judge` (consolidation gate) needs worst KL and derives earlier tasks from the stream order; `episode_gate` checks own task only. Results add `drawdown` (worst drop below running best, per task) and `transfer_drops` (per new task, drop on each earlier task); `forgetting` unchanged. Small tasks cut 25 / 35 / 10 / 30 % (mod-2: gate 179, test 250, val 71, train 216; 716 questions is the space's hard limit). `--beta`/`--gamma` exposed for a beta=0 gamma=0 control; `--dtype-check N` reproduces the bf16 check.
+**Alternatives:** shorter mod-2 episodes with a recorded asymmetry (unequal budgets); a paired-significance form of J's 1 pt rule (kept as an option if 179 gate questions still reject on noise); a bigger mod-2 train pool (smaller gate and test).
+
+## 2026-10-13 - The naive baseline keeps its retain KL and edit norm penalties; a penalty-free control is reported beside it
+**Context:** Re-run with equal budgets (3 seeds each). Penalties on: worst drawdown 4 pts, final avg .436, worst retain KL
+.005. Penalties off (beta 0, gamma 0): mod-4x1 training drives mul-2x3 to ~0 on every seed (drawdown .377), final avg .396,
+retain KL .16-.28 (fails J). Forgetting is real; the penalties are what contain it.
+**Decision:** Step 4 is compared against the penalised naive baseline (the stronger, J-passing one). The free control
+stays as evidence the stream forgets. Gate inputs must be finite (NaN raises).
+**Alternatives:** Compare against the free control only (an easy win that J itself would reject).

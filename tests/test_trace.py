@@ -90,10 +90,10 @@ def test_mirror_questions_share_a_split():
     assert set(split.values()) == {"train", "val", "test"}
 
 
-def test_right_padded_tokenizer_is_rejected(small_lm):
+def test_right_padded_tokenizer_is_rejected(small_lm, tmp_path):
     small_lm.tokenizer.padding_side = "right"
     try:
         with pytest.raises(ValueError, match="left"):
-            record(small_lm, generate(D, 2, seed=0), few_shot_prefix(D), [1], "unused")
+            record(small_lm, generate(D, 2, seed=0), few_shot_prefix(D), [1], tmp_path)
     finally:
         small_lm.tokenizer.padding_side = "left"

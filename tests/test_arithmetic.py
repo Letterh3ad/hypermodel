@@ -48,3 +48,9 @@ def test_difficulty_has_a_stable_name():
     assert Difficulty("add", 2, digits_b=2).name == "add-2"
     with pytest.raises(ValueError):
         Difficulty("div", 2)
+
+
+def test_exclusions_outside_the_setting_do_not_shrink_it():
+    d = Difficulty.parse("mod-2")
+    other = frozenset(generate(Difficulty.parse("mul-2x3"), 1000, 0))
+    assert generate(d, 10_000, 0, exclude=other) == generate(d, 10_000, 0)
