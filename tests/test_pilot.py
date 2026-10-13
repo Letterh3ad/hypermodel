@@ -60,9 +60,15 @@ def test_pilot_runs_every_arm_on_the_gate_and_never_trains_on_it(small_lm, tmp_p
     d = Difficulty.parse("mul-2x3")
     qs = generate(d, 40, 3)
     td, gate = TaskData("mul-2x3", few_shot_prefix(d), test=(), val=tuple(qs[:4]), train=tuple(qs[4:30])), qs[30:]
-    seen = []
+    seen, calls = [], []
     real_train = et.train
-    monkeypatch.setattr(et, "train", lambda *a, **k: seen.extend(a[3] + a[4]) or real_train(*a, **k))
+
+    def spy(*a, **k):
+        seen.extend(a[3] + a[4])
+        calls.append((list(a[3]), list(a[4]), a[5], {x: k[x] for x in ("max_steps", "batch_size", "seed", "beta", "gamma")},
+                      list(k["retain"])))
+        return real_train(*a, **k)
+    monkeypatch.setattr(et, "train", spy)
     obs = Observer(in_dim=2 * 3 * small_lm.d_model, k=8, hidden=16)
     w = small_lm.residual_writers()[2]
     gen = Generator(8, 2, w.in_features, w.out_features, rank=4, basis=4, hidden=16)
@@ -73,6 +79,8 @@ def test_pilot_runs_every_arm_on_the_gate_and_never_trains_on_it(small_lm, tmp_p
         assert [x["prompt"] for x in rows] == [q.prompt for q in gate]
         assert r["gate_acc"][arm] == pytest.approx(sum(x["correct"] for x in rows) / len(rows))
     assert set(r["retain_kl"]) == {"A", "B", "C"} and r["n_failing"] >= 0
+    # train() draws its batches from (questions, retain, seed, batch_size), so equal inputs mean equal batches for A and B.
+    assert len(calls) == 2 and calls[0] == calls[1]
     assert seen and not set(seen) & set(gate)
     # Untrained generator writes U = 0, so arm C is the base model exactly.
     assert r["gate_acc"]["C"] == r["gate_acc"]["base"]
