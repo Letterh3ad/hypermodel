@@ -41,3 +41,18 @@ def test_record_files_pair_by_prompt(tmp_path):
         (tmp_path / name).write_text("".join(json.dumps({"prompt": p, "correct": c}) + "\n" for p, c in rows))
     a, b = paired_records(tmp_path / "a.jsonl", tmp_path / "b.jsonl")
     assert a.tolist() == [True, False] and b.tolist() == [False, True]
+
+
+def test_stratified_bootstrap_with_one_stratum_is_the_pooled_one():
+    from hypermodel.compare import stratified_bootstrap
+    rng = np.random.default_rng(3)
+    pairs = [(rng.random(50) < 0.6, rng.random(50) < 0.5) for _ in range(3)]
+    assert stratified_bootstrap([pairs], n_boot=200) == paired_bootstrap(pairs, n_boot=200)
+
+
+def test_stratified_bootstrap_weights_every_stratum_equally():
+    from hypermodel.compare import stratified_bootstrap
+    small = [(np.ones(4, bool), np.zeros(4, bool))]
+    big = [(np.zeros(100, bool), np.zeros(100, bool))]
+    d = stratified_bootstrap([small, big])
+    assert d["diff"] == d["lo"] == d["hi"] == pytest.approx(0.5)

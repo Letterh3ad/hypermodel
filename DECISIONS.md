@@ -198,3 +198,15 @@ moving parts for a pilot); recomputing failures with the bank applied (a generat
 **Context:** Base accuracy add-3 .97 and mul-1x3 .97 leave almost no failing questions for the generator to read.
 **Decision:** Swap them for add-8 (.62) and mod-5x1 (.30), measured before any meta-training. Disjoint by operand width.
 **Alternatives:** keep the spec's proposal (mod-3 alone would carry the meta signal); mul-1x5 (.86, still high).
+
+## 2026-10-14 - Continual-learning reference points: shapes of joint, oracle bank and replay (ticket 06)
+**Context:** The ticket names the three runs but not how mixed-task batches, replay share or joint order are built.
+**Decision:** All are `--method` variants of the naive-v2 loop (beta 1, gamma .1, 16 calls x 125 steps x batch 16).
+Joint: each task's 4 episodes shuffled and cut so every 2000-question chunk is exactly 500 per task; test rows after
+every 4 chunks. Oracle: one fresh plain LoRA per task, trained and scored only on its own task; worst retain KL is the
+max over experts. Replay: 4 of every 16 questions (25%, batch size unchanged so step and compute budgets stay equal)
+come from 200 train questions drawn per finished task. Mixed batches carry each question's own few-shot prefix.
+final_avg is compared by a task-stratified paired bootstrap (each task weighs the same, as in final_avg); naive-v2
+and free-v2 test records are rescored from their saved states.
+**Alternatives:** replay added on top of the batch (more compute per step); joint drawn i.i.d. (proportions only in
+expectation); pooled-question bootstrap (would weigh mod-2's 250 test questions less than final_avg does).
