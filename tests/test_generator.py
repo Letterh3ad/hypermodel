@@ -6,7 +6,7 @@ import torch
 from hypermodel.adapter import ModelAdapter
 from hypermodel.arithmetic import Difficulty, _pairs, generate
 from hypermodel.editor import ExpertView, LoRABank
-from hypermodel.generator import META, Generator, failure_context, meta_pool
+from hypermodel.generator import META, Generator, SpikeWatch, failure_context, meta_pool
 from hypermodel.stream import RETAIN_ARITH, STREAM, task_data
 
 L, D_IN, D_OUT, R, K = 2, 64, 32, 4, 6  # tiny_model: d_model 32, intermediate 64
@@ -25,6 +25,21 @@ def _bank(E, seed=1):
 
 def _ctx():
     return torch.randn(2 * K + 1)
+
+
+def test_spike_watch_logs_only_episodes_far_above_the_running_median():
+    lines = []
+    w = SpikeWatch(lines.append, min_samples=20)
+    for i in range(30):
+        w(i, "mul-2", 0, 100, norm=1.0 + 0.01 * i, kl=0.5)
+    assert not lines
+    w(30, "mod-5x1", 3, 200, norm=5446.0, kl=0.5)
+    assert lines == [{"spike": 30, "setting": "mod-5x1", "bank": 3, "chunk": 200, "norm": 5446.0, "kl": 0.5}]
+    w(31, "mul-2", 0, 100, norm=2.0, kl=60.0)
+    assert len(lines) == 2 and lines[1]["kl"] == 60.0
+    early = []
+    SpikeWatch(early.append, min_samples=20)(0, "x", 0, 1, norm=1e9, kl=1e9)
+    assert not early
 
 
 def test_meta_settings_are_the_preregistered_ones():

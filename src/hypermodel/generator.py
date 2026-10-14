@@ -4,6 +4,7 @@ Meta-trained on arithmetic settings disjoint from the stream and retain: `python
 import json
 import math
 import random
+import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,9 +164,27 @@ def validate(adapter, gen: Generator, host, settings: dict[str, Setting]) -> dic
     return out
 
 
+class SpikeWatch:
+    """Logs one line for any episode whose edit norm or KL exceeds `factor` x the running median of earlier ones."""
+
+    def __init__(self, log=print, factor: float = 100.0, min_samples: int = 20):
+        self.log, self.factor, self.min_samples = log, factor, min_samples
+        self.seen = {"norm": [], "kl": []}
+
+    def __call__(self, step: int, setting: str, bank: int, chunk: int, **values: float) -> None:
+        hot = {}
+        for k, v in values.items():
+            past = self.seen[k]
+            if len(past) >= self.min_samples and (m := statistics.median(past)) > 0 and v > self.factor * m:
+                hot[k] = v
+            past.append(v)
+        if hot:
+            self.log({"spike": step, "setting": setting, "bank": bank, "chunk": chunk, **values})
+
+
 def meta_step(adapter, gen: Generator, host, settings: dict[str, Setting], retain, rng: random.Random,
               buffer: list, episodes: int, chunk: tuple[int, int], query: int, beta: float, gamma: float,
-              bank_p: float, bank_max: int, buffer_size: int) -> dict[str, float]:
+              bank_p: float, bank_max: int, buffer_size: int, spike=None) -> dict[str, float]:
     """Accumulates gradient over `episodes` episodes, each from a different setting; returns mean loss terms."""
     from hypermodel.edit_train import answer_loss
     from hypermodel.editor import ExpertView
@@ -197,6 +216,8 @@ def meta_step(adapter, gen: Generator, host, settings: dict[str, Setting], retai
         ((ce + beta * kl + gamma * norm) / episodes).backward()
         buffer.append((U.detach(), V.detach()))
         del buffer[:-buffer_size]
+        if spike:
+            spike(name, 0 if bank is None else len(bank[2]), len(idx), norm=norm.item(), kl=kl.item())
         for k, v in (("loss", ce.item()), ("kl", kl.item()), ("norm", norm.item()), ("bank", float(bank is not None))):
             sums[k] += v / episodes
     return sums
@@ -240,12 +261,14 @@ def run(adapter, observer_path: Path, out: Path, seed: int = 0, settings: tuple[
     meta = {"observer": str(observer_path), "obs_layers": list(obs_layers), "edit_layers": list(edit_layers)}
     acc = {"loss": 0.0, "kl": 0.0, "norm": 0.0, "bank": 0.0, "n": 0}
     t = time.perf_counter()
+    watch = SpikeWatch(log)
     step = state["step"]
     while step < max_steps and state["stale"] < patience:
         step += 1
         opt.zero_grad()
         terms = meta_step(adapter, gen, host, S, retain, random.Random(f"{seed}-{step}"), state["buffer"],
-                          min(episodes, len(S)), chunk, query, beta, gamma, bank_p, bank_max, buffer_size)
+                          min(episodes, len(S)), chunk, query, beta, gamma, bank_p, bank_max, buffer_size,
+                          lambda *a, **k: watch(step, *a, **k))
         nn.utils.clip_grad_norm_(gen.parameters(), 1.0)
         opt.step()
         for k, v in terms.items():
