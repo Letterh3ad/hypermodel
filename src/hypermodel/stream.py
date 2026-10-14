@@ -123,10 +123,14 @@ class Evaluator:
     def __setattr__(self, *_):
         raise AttributeError("the evaluator is sealed")
 
+    def records(self, adapter, bank, mixer, name: str) -> list[dict]:
+        """Per gate question records, for paired comparisons."""
+        from hypermodel import edit_train
+        return edit_train.evaluate(adapter, bank, mixer, list(self.gates[name]), self.prefixes[name])
+
     def accuracy(self, adapter, bank, mixer, names: tuple[str, ...] | None = None) -> dict[str, float]:
-        from hypermodel.edit_train import _accuracy, evaluate
-        return {n: _accuracy(evaluate(adapter, bank, mixer, list(self.gates[n]), self.prefixes[n]))
-                for n in (names or tuple(self.gates))}
+        from hypermodel.edit_train import _accuracy
+        return {n: _accuracy(self.records(adapter, bank, mixer, n)) for n in (names or tuple(self.gates))}
 
 
 def forgetting(matrix: list[list[float]]) -> list[float | None]:

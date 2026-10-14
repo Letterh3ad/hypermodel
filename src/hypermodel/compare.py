@@ -8,14 +8,19 @@ from pathlib import Path
 import numpy as np
 
 
-def load_correct(a: Path, b: Path) -> tuple[np.ndarray, np.ndarray]:
-    def rows(run):
-        return {r["prompt"]: r["correct"] for r in map(json.loads, (run / "test_records.jsonl").open())}
+def paired_records(a: Path, b: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Correctness from two records files (jsonl with prompt and correct), aligned by prompt."""
+    def rows(path):
+        return {r["prompt"]: r["correct"] for r in map(json.loads, path.open())}
     A, B = rows(a), rows(b)
     if set(A) != set(B):
-        raise ValueError(f"{a} and {b} were scored on different test questions")
+        raise ValueError(f"{a} and {b} were scored on different questions")
     keys = sorted(A)
     return np.array([A[k] for k in keys], bool), np.array([B[k] for k in keys], bool)
+
+
+def load_correct(a: Path, b: Path) -> tuple[np.ndarray, np.ndarray]:
+    return paired_records(a / "test_records.jsonl", b / "test_records.jsonl")
 
 
 def paired_bootstrap(pairs: list[tuple[np.ndarray, np.ndarray]], n_boot: int = 5000, seed: int = 0) -> dict:
