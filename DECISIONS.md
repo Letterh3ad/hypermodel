@@ -215,3 +215,11 @@ expectation); pooled-question bootstrap (would weigh mod-2's 250 test questions 
 **Context:** The README stopped at step 3 (10-06); the step 4 pilot verdict, CL reference points and pre-registrations lived only in gitignored `.scratch/`, invisible to a reader of the public repo.
 **Decision:** README carries every stage's result, limitations and how the project was built (designed by F, implemented mostly by AI coding agents). `PREREGISTRATIONS.md` (tracked) lists each bar, dated amendment and verdict. `CV_NOTES.md` is gitignored.
 **Alternatives:** Track `.scratch/` reports (agent-workflow noise); a separate `reports/` folder (duplicates the README, as decided 10-06).
+
+## 2026-11-06 - Gradient accumulation splits each term exactly
+**Context:** step 3 reruns OOM in fp32 on Linux at batch 16; F chose 8 x 2 accumulation over bf16 or a Windows boot.
+**Decision:** `--accum-steps` (default 1, bit-identical) splits each step's rows into micro-batches sliced from the
+full padded batch; CE weighted by answer tokens, edit norm by rows, retain KL per source by full-batch token counts,
+so the summed gradient equals batch 16. Same rng draws.
+**Alternatives:** mean of micro-batch means (biased for CE and source-balanced KL); re-tokenizing each micro-batch
+(changes padding and so the edit norm); bf16 autocast (numerics drift).
