@@ -17,7 +17,7 @@
 
 ## 2026-10-03 - Base model replaced: Qwen3-0.6B-Base (supersedes Pythia-160M)
 **Context**: Ticket 01 sweep: Pythia-160M and 1B score 0-3% on 2-digit add/mul and copy operands or repeat one answer; their correct/wrong split is chance. Qwen3-0.6B-Base: add-2 100%, mul-2 72%, mod-2 68% (single-digit tokens).
-**Decision**: Qwen3-0.6B-Base, scaling 0.6B -> 1.7B -> 4B, the same family as the Heretic models. Pythia SAEs no longer apply; ticket 06 finds Qwen3 SAEs or trains small ones. A small abliterated Qwen3 may be made for the C track when needed. The 4/6/8 layer choice (12-layer Pythia) becomes roughly 1/3, 1/2, 2/3 of Qwen3's 28 layers, re-picked from the ticket 03 sweep.
+**Decision**: Qwen3-0.6B-Base, scaling 0.6B -> 1.7B -> 4B. Pythia SAEs no longer apply; ticket 06 finds Qwen3 SAEs or trains small ones. The 4/6/8 layer choice (12-layer Pythia) becomes roughly 1/3, 1/2, 2/3 of Qwen3's 28 layers, re-picked from the ticket 03 sweep.
 **Alternatives**: Qwen2.5-0.5B (mul-2 already in band, other family); Pythia (fails the task).
 
 ## 2026-10-03 - Mixed operand widths in the difficulty dial
@@ -31,7 +31,7 @@
 **Alternatives**: Train domain SAEs up front.
 
 ## 2026-10-03 - Model-agnostic from day one
-**Context**: End goal is making Heretic (abliterated) models self-adaptive, possibly an opsec agent.
+**Context**: End goal is applying the method to other open models and domains, not one architecture.
 **Decision**: Tracing and editing resolve layers through a per-architecture adapter, never hard-coded Pythia module names.
 **Alternatives**: Pythia-only code, generalised later.
 
@@ -60,8 +60,8 @@
 **Alternatives**: Attention output only; both from the start.
 
 ## 2026-10-03 - Evaluator J as pluggable anchors with floors
-**Context**: On a Heretic model, free edits could restore refusals if that scores well.
-**Decision**: J is a list of (metric, floor, weight). Arithmetic accuracy only for now; refusal rate and domain evals slot in later.
+**Context**: Unconstrained edits can trade away behaviour the evaluator does not measure if that scores well.
+**Decision**: J is a list of (metric, floor, weight). Arithmetic accuracy only for now; other behaviour and domain evals slot in later.
 **Alternatives**: Single Acc_anchor as in the spec.
 
 ## 2026-10-03 - Step 1-2 pass bars
@@ -72,7 +72,7 @@
 **Decision**: Spec plus tracer-bullet tickets for steps 1-2 only, built on `phase-1-observer`, review gate, then check in on results. Steps 3+ ticketed after.
 
 ## 2026-10-03 - Gate for non-arithmetic domains
-**Context**: J is the only control on an autonomous self-editor; opsec has no automatic grader.
+**Context**: J is the only control on an autonomous self-editor; open-ended domains have no automatic grader.
 **Decision**: No step 4+ on any non-auto-gradable domain until it has a sealed, automatically checkable eval. Not designed yet.
 
 ## 2026-10-03 - Step 2 bar reframed; "internals beat the question" moves to step 3
@@ -210,3 +210,8 @@ final_avg is compared by a task-stratified paired bootstrap (each task weighs th
 and free-v2 test records are rescored from their saved states.
 **Alternatives:** replay added on top of the batch (more compute per step); joint drawn i.i.d. (proportions only in
 expectation); pooled-question bootstrap (would weigh mod-2's 250 test questions less than final_avg does).
+
+## 2026-11-06 - README is the full report; pre-registrations tracked; CV notes private
+**Context:** The README stopped at step 3 (10-06); the step 4 pilot verdict, CL reference points and pre-registrations lived only in gitignored `.scratch/`, invisible to a reader of the public repo.
+**Decision:** README carries every stage's result, limitations and how the project was built (designed by F, implemented mostly by AI coding agents). `PREREGISTRATIONS.md` (tracked) lists each bar, dated amendment and verdict. `CV_NOTES.md` is gitignored.
+**Alternatives:** Track `.scratch/` reports (agent-workflow noise); a separate `reports/` folder (duplicates the README, as decided 10-06).
