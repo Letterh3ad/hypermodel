@@ -301,9 +301,10 @@ def test_accumulated_step_matches_the_full_batch_step(small_lm, monkeypatch):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-4 * b.abs().max().item())
 
 
-@pytest.mark.parametrize("batch_size,replay_per_batch", [(15, 0), (16, 3)])
-def test_accum_steps_must_split_the_batch_and_its_replay_evenly(batch_size, replay_per_batch):
+@pytest.mark.parametrize("batch_size,replay_per_batch,accum_steps", [(15, 0, 2), (16, 3, 2), (16, 0, 0), (16, 0, -1)])
+def test_accum_steps_must_be_positive_and_split_the_batch_and_its_replay_evenly(batch_size, replay_per_batch,
+                                                                                accum_steps):
     qs = generate(Difficulty("add", 2), 40, 0)
     with pytest.raises(ValueError, match="accum_steps"):
         train(None, _Bank(), ConstantMixer((1, 1)), qs, qs[:2], "", batch_size=batch_size, replay=qs,
-              replay_per_batch=replay_per_batch, accum_steps=2)
+              replay_per_batch=replay_per_batch, accum_steps=accum_steps)

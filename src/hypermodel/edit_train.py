@@ -139,8 +139,8 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     many micro-batches, one backward each, for the same gradient in less memory.
     Restores the state with the best val accuracy."""
     replay_per_batch = replay_per_batch if replay else 0
-    if batch_size % accum_steps or replay_per_batch % accum_steps:
-        raise ValueError(f"accum_steps {accum_steps} must divide batch_size {batch_size} and replay_per_batch "
+    if accum_steps < 1 or batch_size % accum_steps or replay_per_batch % accum_steps:
+        raise ValueError(f"accum_steps {accum_steps} must be positive and divide batch_size {batch_size} and replay_per_batch "
                          f"{replay_per_batch}")
     adapter.model.requires_grad_(False)
     groups = (mixer.param_groups(lr, encoder_lr or lr / 10) if hasattr(mixer, "param_groups")
