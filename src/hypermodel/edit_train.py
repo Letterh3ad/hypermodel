@@ -47,17 +47,26 @@ def answer_batch(tok, prefix: Prefix, questions: list[Question], device) -> dict
 
 
 def answer_loss(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, prefix: Prefix,
-                questions: list[Question]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Answer cross-entropy and the edit norm on the same pass."""
+                questions: list[Question], rows: list[int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Answer cross-entropy and the edit norm on the same pass.
+
+    rows: a micro-batch of questions; both values are then its share of the whole batch's, so the shares sum to
+    them. CE is a mean over answer tokens, so its share is weighted by answer tokens. The edit norm is a mean over
+    every position of the padded batch, pads included, so the whole batch is tokenized for its padding and the share
+    is weighted by rows."""
     batch = answer_batch(adapter.tokenizer, prefix, questions, adapter.device)
     labels = batch.pop("labels")
+    n_tokens, n_rows = int((labels != -100).sum()), len(questions)
+    if rows is not None:
+        batch, labels = {k: v[rows] for k, v in batch.items()}, labels[rows]
+        questions = [questions[r] for r in rows]
     # Left padding puts every answer in the last k columns; full-vocab logits over the long few-shot prefix ran out of
     # memory, so only the k + 1 positions that predict answer tokens are computed.
     k = labels.shape[1] - int((labels != -100).float().argmax(1).min())
     with bank.apply(mixer(questions)) as edits:
         logits = adapter.model(**batch, logits_to_keep=k + 1).logits[:, :-1]
     loss = nn.functional.cross_entropy(logits.float().flatten(0, 1), labels[:, -k:].flatten(), ignore_index=-100)
-    return loss, edits.norm()
+    return loss * (int((labels != -100).sum()) / n_tokens), edits.norm() * (len(questions) / n_rows)
 
 
 def evaluate(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, questions: list[Question],
@@ -108,6 +117,11 @@ def _stratified(items: list[RetainItem], per_source: int, rng: random.Random):
         yield [it for st in streams for it in next(st)]
 
 
+def _micro_batches(n: int, accum_steps: int) -> list[list[int] | None]:
+    """Strided rows, so each micro-batch keeps the batch's replay share; None is the whole batch, untouched."""
+    return [None] if accum_steps == 1 else [list(range(i, n, accum_steps)) for i in range(accum_steps)]
+
+
 def _accuracy(records: list[dict]) -> float:
     return sum(r["correct"] for r in records) / len(records)
 
@@ -117,17 +131,22 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
           lr: float = 1e-3, weight_decay: float = 0.0, eval_every: int = 100, patience: int = 5,
           seed: int = 0, retain: list[RetainItem] | None = None, beta: float = 1.0, gamma: float = 0.0,
           retain_per_source: int = 3, encoder_lr: float | None = None, replay: list[Question] | None = None,
-          replay_per_batch: int = 0, log=print) -> list[dict]:
+          replay_per_batch: int = 0, accum_steps: int = 1, log=print) -> list[dict]:
     """AdamW on the bank and mixer only, minimising answer CE + beta * retain KL + gamma * edit norm.
 
     The KL term weights retain sources equally; a fine-tuned observer trains at encoder_lr (default lr / 10).
-    With replay, replay_per_batch of every batch_size come from it. Restores the state with the best val accuracy."""
+    With replay, replay_per_batch of every batch_size come from it. accum_steps splits each step's batch into that
+    many micro-batches, one backward each, for the same gradient in less memory.
+    Restores the state with the best val accuracy."""
+    replay_per_batch = replay_per_batch if replay else 0
+    if accum_steps < 1 or batch_size % accum_steps or replay_per_batch % accum_steps:
+        raise ValueError(f"accum_steps {accum_steps} must be positive and divide batch_size {batch_size} and replay_per_batch "
+                         f"{replay_per_batch}")
     adapter.model.requires_grad_(False)
     groups = (mixer.param_groups(lr, encoder_lr or lr / 10) if hasattr(mixer, "param_groups")
               else [{"params": list(mixer.parameters()), "lr": lr}])
     opt = torch.optim.AdamW([{"params": list(bank.parameters()), "lr": lr}, *groups], weight_decay=weight_decay)
     rng = random.Random(seed)
-    replay_per_batch = replay_per_batch if replay else 0
     questions = _batches(train_qs, batch_size - replay_per_batch, rng)
     replayed = _batches(replay, replay_per_batch, rng) if replay_per_batch else None
     retain_stream = _stratified(retain, retain_per_source, rng) if retain and beta else None
@@ -137,17 +156,21 @@ def train(adapter: ModelAdapter, bank: LoRABank, mixer: nn.Module, train_qs: lis
     t = time.perf_counter()
     for step in range(1, max_steps + 1):
         bank.train(), mixer.train()
-        ce, norm = answer_loss(adapter, bank, mixer, prefix, next(questions) + (next(replayed) if replayed else []))
-        kl = torch.zeros((), device=ce.device)
-        if retain_stream:
-            chunk = next(retain_stream)
-            kl = retain_kl(adapter, bank, mixer(chunk), retain_batch(adapter.tokenizer, chunk, adapter.device),
-                           [it.source for it in chunk])
+        qs = next(questions) + (next(replayed) if replayed else [])
+        chunk = next(retain_stream) if retain_stream else []
+        if chunk:
+            r_batch = retain_batch(adapter.tokenizer, chunk, adapter.device)
         opt.zero_grad()
-        (ce + beta * kl + gamma * norm).backward()
+        for q_rows, r_rows in zip(_micro_batches(len(qs), accum_steps), _micro_batches(len(chunk), accum_steps)):
+            ce, norm = answer_loss(adapter, bank, mixer, prefix, qs, q_rows)
+            kl = torch.zeros((), device=ce.device)
+            if chunk and r_rows != []:
+                part = chunk if r_rows is None else [chunk[r] for r in r_rows]
+                kl = retain_kl(adapter, bank, mixer(part), r_batch, [it.source for it in chunk], r_rows)
+            (ce + beta * kl + gamma * norm).backward()
+            for k, v in (("loss", ce), ("kl", kl), ("norm", norm)):
+                sums[k] += v.item()
         opt.step()
-        for k, v in (("loss", ce), ("kl", kl), ("norm", norm)):
-            sums[k] += v.item()
         sums["n"] += 1
         if step % eval_every and step != max_steps:
             continue
@@ -250,6 +273,7 @@ def main():
     p.add_argument("--alpha", type=float, default=16.0)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--accum-steps", type=int, default=1, help="micro-batches per step; must divide --batch-size")
     p.add_argument("--max-steps", type=int, default=3000)
     p.add_argument("--eval-every", type=int, default=250)
     p.add_argument("--patience", type=int, default=4)
@@ -298,7 +322,8 @@ def main():
     history = train(adapter, bank, mixer, qs["train"], random.Random(args.seed).sample(qs["val"], args.val_n),
                     prefix, args.max_steps, args.batch_size, args.lr, eval_every=args.eval_every,
                     patience=args.patience, seed=args.seed,
-                    retain=retain_train, beta=args.beta, gamma=args.gamma, encoder_lr=args.encoder_lr, log=log)
+                    retain=retain_train, beta=args.beta, gamma=args.gamma, encoder_lr=args.encoder_lr,
+                    accum_steps=args.accum_steps, log=log)
     records = evaluate(adapter, bank, mixer, qs["test"], prefix)
     acc = _accuracy(records)
     kl = evaluate_retain(adapter, bank, mixer, retain_test)
