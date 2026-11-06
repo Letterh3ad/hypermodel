@@ -426,3 +426,15 @@ def test_table_reports_a_method_without_records_without_a_ci(tmp_path):
     (d / "test_records.jsonl").unlink()
     rows = stream.table([tmp_path / "base", tmp_path / "old"])
     assert rows[1]["vs_base"] is None and "n/a" in stream.format_table(rows)
+
+
+def test_table_adds_a_seed_and_question_ci_beside_the_question_only_one(tmp_path):
+    for s in range(3):
+        _fake_run(tmp_path, "base", s, [0.5, 0.5], {"a": [1, 0], "b": [1, 0, 0, 1]})
+        _fake_run(tmp_path, "up", s, [1.0, 0.75], {"a": [1, 1], "b": [1, 1, 0, 1]})
+    _fake_run(tmp_path, "one", 0, [0.5, 0.5], {"a": [1, 0], "b": [1, 0, 0, 1]})
+    rows = stream.table([tmp_path / "base", tmp_path / "up", tmp_path / "one"])
+    up, one = rows[1], rows[2]
+    assert up["vs_base_seeds"]["diff"] == up["vs_base"]["diff"] and one["vs_base_seeds"] is None
+    text = stream.format_table(rows)
+    assert "n/a (1 seed)" in text.splitlines()[3] and text.count("+37.5") == 2

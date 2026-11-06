@@ -259,7 +259,8 @@ def _runs(prefix: Path) -> dict[str, Path]:
 
 def table(prefixes: list[Path]) -> list[dict]:
     """One row per run prefix (seeds = its -s* dirs): mean final per task acc and final_avg, worst drawdown, worst
-    retain KL, and a task-stratified paired bootstrap of final_avg against the first prefix over the shared seeds."""
+    retain KL, and a task-stratified paired bootstrap of final_avg against the first prefix over the shared seeds, by
+    questions only and by seeds x questions (None below 2 shared seeds)."""
     from hypermodel.compare import paired_records, stratified_bootstrap
 
     def task_pairs(a: Path, b: Path, t: str):
@@ -271,24 +272,28 @@ def table(prefixes: list[Path]) -> list[dict]:
         tasks = res[0]["tasks"]
         paired = [(d, base[s]) for s, d in runs.items() if s in base]
         ok = paired and all((x / "test_records.jsonl").exists() for pair in paired for x in pair)
+        strata = [[task_pairs(a, b, t) for a, b in paired] for t in tasks] if ok else None
         rows.append({"name": p.name, "seeds": len(runs), "tasks": tasks,
                      "final": [sum(r["matrix"][-1][j] for r in res) / len(res) for j in range(len(tasks))],
                      "final_avg": sum(r["final_avg"] for r in res) / len(res),
                      "max_drawdown": max(max(r["drawdown"]) for r in res),
                      "worst_kl": max(r["retain_kl"]["worst"] for r in res),
-                     "vs_base": stratified_bootstrap([[task_pairs(a, b, t) for a, b in paired] for t in tasks])
-                     if ok else None})
+                     "vs_base": stratified_bootstrap(strata) if strata else None,
+                     "vs_base_seeds": stratified_bootstrap(strata, resample_seeds=True)
+                     if strata and len(paired) > 1 else None})
     return rows
 
 
 def format_table(rows: list[dict]) -> str:
-    head = ["run", "n", *rows[0]["tasks"], "final_avg", "max_dd", "worst_kl", "vs first, pts [95% CI]"]
+    from hypermodel.compare import format_ci
+
+    head = ["run", "n", *rows[0]["tasks"], "final_avg", "max_dd", "worst_kl", "vs first, pts [95% CI] by questions",
+            "by seeds x questions"]
     lines = []
     for r in rows:
-        v = r["vs_base"]
-        ci = f"{100 * v['diff']:+.1f} [{100 * v['lo']:+.1f}, {100 * v['hi']:+.1f}]" if v else "n/a"
+        two_way = "n/a" if r["vs_base"] is None else format_ci(r["vs_base_seeds"], na="n/a (1 seed)")
         lines.append([r["name"], str(r["seeds"]), *(f"{x:.3f}" for x in r["final"]), f"{r['final_avg']:.3f}",
-                      f"{r['max_drawdown']:.3f}", f"{r['worst_kl']:.4f}", ci])
+                      f"{r['max_drawdown']:.3f}", f"{r['worst_kl']:.4f}", format_ci(r["vs_base"]), two_way])
     w = [max(len(c) for c in col) for col in zip(head, *lines)]
     return "\n".join("  ".join(c.ljust(n) for c, n in zip(row, w)) for row in [head, *lines])
 
