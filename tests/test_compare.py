@@ -56,3 +56,53 @@ def test_stratified_bootstrap_weights_every_stratum_equally():
     big = [(np.zeros(100, bool), np.zeros(100, bool))]
     d = stratified_bootstrap([small, big])
     assert d["diff"] == d["lo"] == d["hi"] == pytest.approx(0.5)
+
+
+def _seeded_pairs(seed_shift, n_seeds=3, n_q=400, noise=0.0, seed=5):
+    """Pairs where A beats B by seed_shift[s] on each seed s, plus independent per-question noise."""
+    rng = np.random.default_rng(seed)
+    b = rng.random((n_seeds, n_q)) < 0.5
+    p = np.clip(0.5 + np.asarray(seed_shift)[:, None] + noise * (rng.random((n_seeds, n_q)) - 0.5), 0, 1)
+    a = rng.random((n_seeds, n_q)) < p
+    return [(a[s], b[s]) for s in range(n_seeds)]
+
+
+def test_two_way_with_one_seed_is_the_question_only_bootstrap():
+    from hypermodel.compare import stratified_bootstrap
+    rng = np.random.default_rng(4)
+    strata = [[(rng.random(n) < 0.6, rng.random(n) < 0.5)] for n in (30, 80)]
+    assert stratified_bootstrap(strata, n_boot=300, resample_seeds=True) == stratified_bootstrap(strata, n_boot=300)
+    pairs = strata[0]
+    assert paired_bootstrap(pairs, n_boot=300, resample_seeds=True) == paired_bootstrap(pairs, n_boot=300)
+
+
+def test_two_way_ci_widens_with_seed_variance():
+    pairs = [(np.tile(a, 20), np.tile(b, 20)) for a, b in _seeded_pairs([-0.3, 0.0, 0.3], n_q=50)]
+    q, sq = paired_bootstrap(pairs, n_boot=1000), paired_bootstrap(pairs, n_boot=1000, resample_seeds=True)
+    assert q["diff"] == sq["diff"]
+    assert sq["hi"] - sq["lo"] > 3 * (q["hi"] - q["lo"])
+
+
+def test_two_way_matches_question_only_without_seed_variance():
+    a, b = _seeded_pairs([0.1])[0]
+    pairs = [(a, b)] * 3
+    q, sq = paired_bootstrap(pairs, n_boot=2000), paired_bootstrap(pairs, n_boot=2000, resample_seeds=True)
+    assert sq["lo"] == pytest.approx(q["lo"], abs=0.01) and sq["hi"] == pytest.approx(q["hi"], abs=0.01)
+
+
+def test_two_way_keeps_pairing_by_question():
+    pairs = _seeded_pairs([0.0, 0.1, 0.2], noise=0.4)
+    perm = np.random.default_rng(9).permutation(len(pairs[0][0]))
+    shuffled = [(a[perm], b[perm]) for a, b in pairs]
+    d, ds = (paired_bootstrap(p, n_boot=2000, resample_seeds=True) for p in (pairs, shuffled))
+    assert ds["diff"] == pytest.approx(d["diff"])
+    assert ds["lo"] == pytest.approx(d["lo"], abs=0.01) and ds["hi"] == pytest.approx(d["hi"], abs=0.01)
+    same = paired_bootstrap([(a, a) for a, _ in pairs], n_boot=200, resample_seeds=True)
+    assert same["lo"] == same["hi"] == 0
+
+
+def test_two_way_needs_the_same_seeds_in_every_stratum():
+    from hypermodel.compare import stratified_bootstrap
+    one = (np.ones(4, bool), np.zeros(4, bool))
+    with pytest.raises(ValueError):
+        stratified_bootstrap([[one, one], [one]], n_boot=10, resample_seeds=True)
