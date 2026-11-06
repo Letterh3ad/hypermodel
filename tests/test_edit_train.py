@@ -254,7 +254,7 @@ def test_replay_fills_its_share_of_every_batch(monkeypatch):
     import hypermodel.edit_train as et
     seen = []
 
-    def loss(adapter, bank, mixer, prefix, batch):
+    def loss(adapter, bank, mixer, prefix, batch, rows=None):
         seen.append(batch)
         return bank.w.sum() + 1, torch.zeros(())
     monkeypatch.setattr(et, "answer_loss", loss)
@@ -270,3 +270,40 @@ def test_replay_fills_its_share_of_every_batch(monkeypatch):
     train(adapter, _Bank(), ConstantMixer((1, 1)), current, current[:2], "", max_steps=3, batch_size=16,
           eval_every=3, replay=[], replay_per_batch=4, log=lambda h: None)
     assert all(len(b) == 16 and set(b) <= set(current) for b in seen)
+
+
+@pytest.mark.slow
+def test_accumulated_step_matches_the_full_batch_step(small_lm, monkeypatch):
+    import hypermodel.retain as retain
+
+    monkeypatch.setattr(retain, "_load_wikitext", lambda split: (_ for _ in ()).throw(ConnectionError()))
+    prefix = few_shot_prefix(Difficulty("add", 2))
+    # Mixed answer lengths, so a mean of micro-batch CE means would differ from the token-weighted whole.
+    qs = generate(Difficulty("add", 2), 20, seed=0) + generate(Difficulty("mul", 3, 3), 20, seed=0)
+    old = generate(Difficulty("mul", 2), 12, seed=1)
+    r_train = retain.retain_items("train", 6, 4)
+    runs = {}
+    for accum in (1, 2):
+        torch.manual_seed(0)
+        bank = LoRABank(small_lm, [2, 4], n_experts=2, rank=4)
+        with torch.no_grad():
+            for p in bank.parameters():
+                p.normal_(0, 0.1)  # U = 0 is the KL minimum, where its gradient vanishes
+        mixer = ConstantMixer(bank.shape)
+        history = train(small_lm, bank, mixer, qs, qs[:2], prefix, max_steps=1, batch_size=8, eval_every=1, seed=1,
+                        retain=r_train, beta=2.0, gamma=3.0, replay=old, replay_per_batch=2, accum_steps=accum,
+                        log=lambda h: None)
+        runs[accum] = history[0], [p.grad.clone() for p in [*bank.parameters(), *mixer.parameters()]]
+    (full, full_grads), (acc, acc_grads) = runs[1], runs[2]
+    for k in ("loss", "kl", "norm"):
+        assert full[k] > 0 and acc[k] == pytest.approx(full[k], rel=1e-5), k
+    for a, b in zip(acc_grads, full_grads):  # fp32 sums over many tokens: tolerance scaled to the gradient
+        torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-4 * b.abs().max().item())
+
+
+@pytest.mark.parametrize("batch_size,replay_per_batch", [(15, 0), (16, 3)])
+def test_accum_steps_must_split_the_batch_and_its_replay_evenly(batch_size, replay_per_batch):
+    qs = generate(Difficulty("add", 2), 40, 0)
+    with pytest.raises(ValueError, match="accum_steps"):
+        train(None, _Bank(), ConstantMixer((1, 1)), qs, qs[:2], "", batch_size=batch_size, replay=qs,
+              replay_per_batch=replay_per_batch, accum_steps=2)

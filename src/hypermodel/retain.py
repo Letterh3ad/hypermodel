@@ -68,12 +68,16 @@ def retain_batch(tok, items: list[RetainItem], device) -> dict:
     return {**batch, "kl_mask": kl_mask}
 
 
+def _scored(batch: dict) -> torch.Tensor:
+    """Positions whose next-token prediction the KL scores."""
+    # Position t predicts token t + 1, and must itself be real: under left padding a pad predicts the first token.
+    return batch["kl_mask"][:, 1:] & batch["attention_mask"][:, :-1].bool()
+
+
 def token_kl(adapter: ModelAdapter, bank: LoRABank, g: Mixing, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
     """KL per predicted token inside batch["kl_mask"], and the row each came from; base pass has hooks off."""
     inputs = {k: batch[k] for k in ("input_ids", "attention_mask", "position_ids")}
-    # Position t predicts token t + 1, and must itself be real: under left padding a pad predicts the first token.
-    # Selecting before the vocab-wide softmax saves memory.
-    target = batch["kl_mask"][:, 1:] & batch["attention_mask"][:, :-1].bool()
+    target = _scored(batch)  # selected before the vocab-wide softmax to save memory
     with torch.no_grad():
         base = adapter.model(**inputs).logits[:, :-1][target].float().log_softmax(-1)
     with bank.apply(g):
@@ -82,12 +86,26 @@ def token_kl(adapter: ModelAdapter, bank: LoRABank, g: Mixing, batch: dict) -> t
     return kl, target.nonzero()[:, 0]
 
 
-def source_balanced(kl: torch.Tensor, rows: torch.Tensor, sources: list[str]) -> torch.Tensor:
-    """Mean over sources of each source's per-token mean: a paragraph has ~10x the tokens of a question."""
-    src = torch.tensor([sorted(set(sources)).index(s) for s in sources], device=kl.device)[rows]
-    return torch.stack([kl[src == i].mean() for i in src.unique()]).mean()
+def source_balanced(kl: torch.Tensor, rows: torch.Tensor, sources: list[str],
+                    counts: dict[str, int] | None = None) -> torch.Tensor:
+    """Mean over sources of each source's per-token mean: a paragraph has ~10x the tokens of a question.
+
+    counts: each source's token count in a whole batch that kl covers only part of. Each token then weighs
+    1 / (count of its source * number of sources), so the parts' values sum to the whole batch's."""
+    names = sorted(set(sources))
+    src = torch.tensor([names.index(s) for s in sources], device=kl.device)[rows]
+    if counts is None:
+        return torch.stack([kl[src == i].mean() for i in src.unique()]).mean()
+    return torch.stack([kl[src == i].sum() / counts[names[i]] for i in src.unique()]).sum() / len(counts)
 
 
 def retain_kl(adapter: ModelAdapter, bank: LoRABank, g: Mixing, batch: dict,
-              sources: list[str]) -> torch.Tensor:
-    return source_balanced(*token_kl(adapter, bank, g, batch), sources)
+              sources: list[str], rows: list[int] | None = None) -> torch.Tensor:
+    """rows: a micro-batch of the batch; returns its share of the whole batch's KL (see source_balanced)."""
+    if rows is None:
+        return source_balanced(*token_kl(adapter, bank, g, batch), sources)
+    counts: dict[str, int] = {}
+    for s, n in zip(sources, _scored(batch).sum(1).tolist()):
+        counts[s] = counts.get(s, 0) + n
+    part = {k: v[rows] for k, v in batch.items()}
+    return source_balanced(*token_kl(adapter, bank, g, part), [sources[r] for r in rows], counts)
